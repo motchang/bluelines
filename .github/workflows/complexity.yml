@@ -1,0 +1,97 @@
+# Measures code complexity (cognitive and cyclomatic) of the Rust crate.
+# Measurement uses cccc (https://github.com/moznion/cccc) and octocov comments
+# the results on pull requests. The thresholds live in .cccc.toml; the job fails
+# when any function exceeds them.
+name: Complexity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: complexity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  complexity:
+    name: Measure & track complexity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # octocov needs this to comment the metrics on pull requests.
+      pull-requests: write
+      # octocov reads and writes past reports stored as workflow artifacts.
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job does no git operations, so keep the token out of .git/config.
+          persist-credentials: false
+
+      - name: Measure complexity (cccc)
+        id: cccc
+        # cccc fails when a threshold is exceeded. The report should still be
+        # produced, so only record the failure here and fail the job in the
+        # final "Enforce complexity thresholds" step.
+        continue-on-error: true
+        uses: moznion/cccc-action@1d5313811f8451953e46a268c61791a01e40b7df # v1.1.2
+        with:
+          path: src
+          output-file: cccc.json
+          config: .cccc.toml
+
+      - name: Build octocov custom metrics
+        run: |
+          jq '{
+            key: "code_complexity",
+            name: "Code Complexity (Rust)",
+            metrics: [
+              { key: "function_count", name: "Function count", value: .summary.function_count },
+              { key: "cognitive_sum", name: "Cognitive: total", value: .summary.cognitive.sum },
+              { key: "cognitive_max", name: "Cognitive: max", value: .summary.cognitive.max },
+              { key: "cognitive_median", name: "Cognitive: median", value: .summary.cognitive.median },
+              { key: "cognitive_p90", name: "Cognitive: p90", value: .summary.cognitive.p90 },
+              { key: "cyclomatic_sum", name: "Cyclomatic: total", value: .summary.cyclomatic.sum },
+              { key: "cyclomatic_max", name: "Cyclomatic: max", value: .summary.cyclomatic.max },
+              { key: "cyclomatic_median", name: "Cyclomatic: median", value: .summary.cyclomatic.median },
+              { key: "cyclomatic_p90", name: "Cyclomatic: p90", value: .summary.cyclomatic.p90 }
+            ]
+          }' cccc.json > custom_metrics_complexity.json
+          echo "::group::custom_metrics_complexity.json"
+          cat custom_metrics_complexity.json
+          echo "::endgroup::"
+
+      - name: Append top complex functions to job summary
+        run: |
+          {
+            echo "## Top 20 functions by Cognitive Complexity"
+            echo ""
+            echo "| Cognitive | Cyclomatic | Function | File:Line |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '
+              [ .files[] | .path as $p | .functions[] | recurse(.children[]?)
+              | { path: $p, name: .name, line: .line, cognitive: .cognitive, cyclomatic: .cyclomatic } ]
+              | sort_by(-.cognitive) | .[:20][]
+              | "| \(.cognitive) | \(.cyclomatic) | `\(.name)` | \(.path):\(.line) |"
+            ' cccc.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run octocov
+        # Pull requests from forks get a token without comment permission, so skip.
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+        uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
+        with:
+          config: .octocov.complexity.yml
+        env:
+          OCTOCOV_CUSTOM_METRICS_COMPLEXITY: custom_metrics_complexity.json
+
+      - name: Enforce complexity thresholds
+        if: steps.cccc.outcome == 'failure'
+        run: |
+          echo "::error::A function exceeds a threshold in .cccc.toml (max-cognitive / max-cyclomatic). See the job summary." >&2
+          exit 1

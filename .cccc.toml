@@ -1,0 +1,18 @@
+# Code complexity settings, read by CI (.github/workflows/complexity.yml).
+# Only the Rust crate is measured; the sh/bun implementation is left out until
+# the cut-over. Integration tests under tests/ are excluded because they repeat
+# the same shape of assertion and say little about readability. Unit tests in
+# `#[cfg(test)]` modules cannot be excluded by path, so they are measured too.
+languages = ["rust"]
+exclude = [
+  "target/**",
+  "tests/**",
+  "benches/**",
+]
+min = 1
+
+# CI thresholds: the job fails when any function exceeds one of them.
+# The values follow common defaults (SonarQube's cognitive complexity limit of
+# 15, and a cyclomatic complexity limit of 10).
+max-cognitive = 15
+max-cyclomatic = 10

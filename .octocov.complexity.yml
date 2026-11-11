@@ -1,0 +1,17 @@
+# octocov settings for the code complexity report, read by CI
+# (.github/workflows/complexity.yml). It comments the metrics on pull requests
+# and stores the report from main as an artifact to diff against. The report is
+# stored under its own repository key so it never mixes with other octocov
+# reports (such as coverage).
+repository: ${GITHUB_REPOSITORY}/complexity
+comment:
+  if: is_pull_request
+summary:
+  if: true
+report:
+  if: is_default_branch
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
