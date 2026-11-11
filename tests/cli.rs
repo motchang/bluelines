@@ -104,6 +104,9 @@ struct Env {
     dir: tempfile::TempDir,
     port: u16,
     herdr: bool,
+    /// PATH beyond the stand-ins, which the opener test empties: the machine
+    /// may have a real `open` or `xdg-open`.
+    system_path: &'static str,
 }
 
 impl Env {
@@ -126,7 +129,12 @@ impl Env {
             .local_addr()
             .unwrap()
             .port();
-        Env { dir, port, herdr }
+        Env {
+            dir,
+            port,
+            herdr,
+            system_path: ":/usr/bin:/bin",
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -294,7 +302,8 @@ fn reports_what_cannot_be_previewed() {
 
 #[test]
 fn refuses_without_an_opener() {
-    let env = Env::new(false);
+    let mut env = Env::new(false);
+    env.system_path = "";
     fs::remove_file(env.path("bin/open")).unwrap();
     fs::remove_file(env.path("bin/xdg-open")).unwrap();
     let file = env.markdown("a.md");
