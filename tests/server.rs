@@ -115,7 +115,20 @@ impl Server {
 }
 
 impl Drop for Server {
+    /// Asks the server to exit rather than killing it, so that a coverage run
+    /// gets to write the server's profile on the way out. Killed only if it
+    /// does not go.
     fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let host = self.host();
+            let _ = std::panic::catch_unwind(|| {
+                request(self.port, "POST", "/shutdown", &[("host", &host)], None)
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
