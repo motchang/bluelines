@@ -58,6 +58,43 @@ fn tabs(browser: &Value) -> &[Value] {
         .map_or(&[], Vec::as_slice)
 }
 
+/// Whether a tab is on the render server at `base`, as a preview.
+fn is_preview(tab: &Value, base: &str) -> bool {
+    let url = tab.get("url").and_then(Value::as_str).unwrap_or_default();
+    url.strip_prefix(base)
+        .is_some_and(|path| path == "/" || path.starts_with("/?"))
+}
+
+/// One browser's preview tabs, each with whether it is the active one. A
+/// browser without a key or a pane cannot be driven and has none.
+fn browser_previews(browser: &Value, base: &str) -> Vec<(bool, Preview)> {
+    let (Some(key), Some(pane)) = (
+        scalar(browser.get("key")),
+        scalar(pane_field(browser, "pane")),
+    ) else {
+        return Vec::new();
+    };
+    let all_tabs = tabs(browser);
+    let here: Vec<&Value> = all_tabs.iter().filter(|t| is_preview(t, base)).collect();
+    let all = here.len() == all_tabs.len();
+    here.into_iter()
+        .filter_map(|t| {
+            let preview = Preview {
+                key: key.clone(),
+                tab: scalar(t.get("id"))?,
+                pane: pane.clone(),
+                all,
+                target: t
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            };
+            Some((t.get("active") == Some(&Value::Bool(true)), preview))
+        })
+        .collect()
+}
+
 impl Listing {
     /// Parses the first JSON value in `ls` output. No output at all is an
     /// error too: a terminal-browser that dies without printing must not read
@@ -85,47 +122,12 @@ impl Listing {
     /// are the two shapes a preview URL takes; `/health` and the other
     /// endpoints are not previews even though they are on the same server.
     pub fn previews(&self, tab: &str, base: &str) -> Vec<Preview> {
-        let query_prefix = format!("{base}/?");
-        let root = format!("{base}/");
-        let is_preview = |t: &Value| {
-            let url = t.get("url").and_then(Value::as_str).unwrap_or_default();
-            url.starts_with(&query_prefix) || url == root
-        };
-        let mut found: Vec<(bool, Preview)> = Vec::new();
-        for browser in &self.browsers {
-            if !in_tab(browser, tab) {
-                continue;
-            }
-            let (Some(key), Some(pane)) = (
-                scalar(browser.get("key")),
-                scalar(pane_field(browser, "pane")),
-            ) else {
-                continue;
-            };
-            let all_tabs = tabs(browser);
-            let here: Vec<&Value> = all_tabs.iter().filter(|t| is_preview(t)).collect();
-            let all = here.len() == all_tabs.len();
-            for t in here {
-                let Some(id) = scalar(t.get("id")) else {
-                    continue;
-                };
-                let active = t.get("active") == Some(&Value::Bool(true));
-                found.push((
-                    active,
-                    Preview {
-                        key: key.clone(),
-                        tab: id,
-                        pane: pane.clone(),
-                        all,
-                        target: t
-                            .get("targetId")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                    },
-                ));
-            }
-        }
+        let mut found: Vec<(bool, Preview)> = self
+            .browsers
+            .iter()
+            .filter(|b| in_tab(b, tab))
+            .flat_map(|b| browser_previews(b, base))
+            .collect();
         // Stable, so the listing's own order holds among equals.
         found.sort_by_key(|(active, _)| !active);
         found.into_iter().map(|(_, p)| p).collect()

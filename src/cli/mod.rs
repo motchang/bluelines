@@ -21,6 +21,7 @@ use clap::{Args, Parser, Subcommand};
 use args::{Mode, USAGE};
 use client::Server;
 use herdr::Herdr;
+use listing::Preview;
 
 /// The render server's default loopback port; `BLUELINE_PORT` overrides it.
 pub const DEFAULT_PORT: u16 = 43128;
@@ -159,42 +160,41 @@ impl Session {
 
     fn run(&self, mode: Mode) -> Result<ExitCode, Failure> {
         match mode {
-            Mode::Help => {
-                println!("{USAGE}");
-                Ok(ExitCode::SUCCESS)
-            }
-            Mode::Version => {
-                println!("blueline {}", env!("CARGO_PKG_VERSION"));
-                Ok(ExitCode::SUCCESS)
-            }
+            Mode::Help => print_and_succeed(USAGE),
+            Mode::Version => print_and_succeed(concat!("blueline ", env!("CARGO_PKG_VERSION"))),
             Mode::Stop => self.stop(),
             Mode::Pane => self.pane(),
             Mode::Reset { file } => self.reset(file.as_deref()),
-            Mode::Browser { file } => {
-                let file = match file {
-                    Some(f) => {
-                        let file = resolve_file(&f)?;
-                        self.server.ensure()?;
-                        file
-                    }
-                    // No file named: the most recent file any surface was
-                    // pointed at, which is what "the preview" means to someone
-                    // who did not name one.
-                    None => self.resume(Resume::Recent)?,
-                };
-                self.preview_in_browser(&file)
-            }
+            Mode::Browser { file } => self.browser(file.as_deref()),
             Mode::Action { command } => self.action(&command),
-            Mode::Preview { file, term } => {
-                if term {
-                    self.term(&file)
-                } else {
-                    let file = resolve_file(&file)?;
-                    self.server.ensure()?;
-                    self.preview_in_browser(&file)
-                }
-            }
+            Mode::Preview { file, term } => self.preview(&file, term),
         }
+    }
+
+    fn preview(&self, file: &OsStr, term: bool) -> Result<ExitCode, Failure> {
+        if term {
+            self.term(file)
+        } else {
+            self.browser(Some(file))
+        }
+    }
+
+    /// A browser tab on `file`, or with no file on the most recent file any
+    /// surface was pointed at - what "the preview" means to someone who did
+    /// not name one.
+    fn browser(&self, file: Option<&OsStr>) -> Result<ExitCode, Failure> {
+        let file = match file {
+            Some(f) => self.named_file(f)?,
+            None => self.resume(Resume::Recent)?,
+        };
+        self.preview_in_browser(&file)
+    }
+
+    /// A file named on the command line, with our server up to show it.
+    fn named_file(&self, arg: &OsStr) -> Result<PathBuf, Failure> {
+        let file = resolve_file(arg)?;
+        self.server.ensure()?;
+        Ok(file)
     }
 
     /// The herdr side, for the modes that act on a pane preview. `mode` names
@@ -334,20 +334,7 @@ impl Session {
     /// Failing to close it is not a reason to leave the server running - the
     /// part that was asked for - so it is reported and the stop carries on.
     fn stop(&self) -> Result<ExitCode, Failure> {
-        let mut closed = "";
-        let mut code = ExitCode::SUCCESS;
-        if let (Some(_), Some(_)) = (&self.scope, &self.tb) {
-            let herdr = self.herdr("--stop")?;
-            match herdr.close_previews() {
-                Ok(true) => closed = " and closed this tab's preview",
-                Ok(false) => {}
-                Err(failure) => {
-                    failure.report();
-                    closed = " but could not close this tab's preview";
-                    code = ExitCode::FAILURE;
-                }
-            }
-        }
+        let (closed, mut ok) = self.close_for_stop()?;
         let port = self.server.port;
         match self.server.stop() {
             Ok(true) => println!("blueline: stopped the server on {port}{closed}"),
@@ -357,10 +344,31 @@ impl Session {
                 if let Some(done) = closed.strip_prefix(" and ") {
                     println!("blueline: {done}");
                 }
-                code = ExitCode::FAILURE;
+                ok = false;
             }
         }
-        Ok(code)
+        Ok(if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        })
+    }
+
+    /// Closes this tab's preview for `--stop`, returning what to add to the
+    /// message and whether it went well. Outside herdr, or without
+    /// terminal-browser, there is no preview here and nothing to say.
+    fn close_for_stop(&self) -> Result<(&'static str, bool), Failure> {
+        if self.scope.is_none() || self.tb.is_none() {
+            return Ok(("", true));
+        }
+        Ok(match self.herdr("--stop")?.close_previews() {
+            Ok(true) => (" and closed this tab's preview", true),
+            Ok(false) => ("", true),
+            Err(failure) => {
+                failure.report();
+                (" but could not close this tab's preview", false)
+            }
+        })
     }
 
     /// `--pane`: the herdr panes holding this tab's previews, one per line.
@@ -388,21 +396,8 @@ impl Session {
     fn reset(&self, file: Option<&OsStr>) -> Result<ExitCode, Failure> {
         let herdr = self.herdr("--reset")?;
         let file = match file {
-            Some(f) => {
-                let file = resolve_file(f)?;
-                self.server.ensure()?;
-                file
-            }
-            None => {
-                // No file and no pane preview here: refused rather than rebuilt
-                // onto whatever a pane in some other tab last opened.
-                if herdr.resolve(true)?.previews.is_empty() {
-                    return Err(Failure::new(
-                        "no pane preview in this tab to reset - reload a browser tab yourself; 'blueline --term <file.md>' opens a pane",
-                    ));
-                }
-                self.resume(Resume::Current)?
-            }
+            Some(f) => self.named_file(f)?,
+            None => self.reset_onto_current(&herdr)?,
         };
         // Handed over before anything is closed, because closing is
         // destructive and this is the last step that can still refuse.
@@ -414,6 +409,18 @@ impl Session {
             file.display()
         );
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// The file `--reset` with no file comes back to. With no pane preview
+    /// here it is refused rather than rebuilt onto whatever a pane in some
+    /// other tab last opened.
+    fn reset_onto_current(&self, herdr: &Herdr<'_>) -> Result<PathBuf, Failure> {
+        if herdr.resolve(true)?.previews.is_empty() {
+            return Err(Failure::new(
+                "no pane preview in this tab to reset - reload a browser tab yourself; 'blueline --term <file.md>' opens a pane",
+            ));
+        }
+        self.resume(Resume::Current)
     }
 
     /// `-- <command>`: a `terminal-browser action` command against this tab's
@@ -435,15 +442,7 @@ impl Session {
                 "no preview in this tab - run 'blueline --term <file.md>' to open one; a preview opened without --term is a desktop tab and cannot be driven from here",
             ));
         };
-        let preview = if preview.target.is_empty() {
-            herdr.wait_preview(10)?.ok_or_else(|| {
-                Failure::new(
-                    "the preview in this tab has no CDP target after 10s - is it stuck? 'blueline --reset' replaces it",
-                )
-            })?
-        } else {
-            preview.clone()
-        };
+        let preview = with_target(&herdr, preview)?;
         let code = herdr.action(&preview, command);
         Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
     }
@@ -458,25 +457,53 @@ impl Session {
             ));
         }
         let herdr = self.herdr("--term")?;
-        let file = resolve_file(file)?;
-        self.server.ensure()?;
+        let file = self.named_file(file)?;
         let found = herdr.resolve(true)?;
         self.server.open(&file, true)?;
-        let Some(preview) = found.first() else {
-            let opened = herdr.open_preview(&file)?;
-            println!("blueline: previewing {} {opened}", file.display());
-            return Ok(ExitCode::SUCCESS);
+        let opened = match found.first() {
+            None => format!(" {}", herdr.open_preview(&file)?),
+            Some(preview) => {
+                Self::navigate_or_replace(&herdr, preview, &file).map(|()| String::new())?
+            }
         };
-        // A preview that will not take the navigation is replaced rather than
-        // reported: the caller asked to see a file, and a new preview shows it.
-        if !herdr.navigate(preview, &file)? {
-            eprintln!("blueline: the preview in this tab did not answer - replacing it");
-            herdr.close_previews()?;
-            herdr.open_preview(&file)?;
-        }
-        println!("blueline: previewing {}", file.display());
+        println!("blueline: previewing {}{opened}", file.display());
         Ok(ExitCode::SUCCESS)
     }
+
+    /// Points the preview at `file`. One that will not take the navigation is
+    /// replaced rather than reported: the caller asked to see a file, and a
+    /// new preview shows it.
+    fn navigate_or_replace(
+        herdr: &Herdr<'_>,
+        preview: &Preview,
+        file: &Path,
+    ) -> Result<(), Failure> {
+        if herdr.navigate(preview, file)? {
+            return Ok(());
+        }
+        eprintln!("blueline: the preview in this tab did not answer - replacing it");
+        herdr.close_previews()?;
+        herdr.open_preview(file)?;
+        Ok(())
+    }
+}
+
+fn print_and_succeed(text: &str) -> Result<ExitCode, Failure> {
+    println!("{text}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A preview with a CDP target, waiting for one when it is still starting:
+/// `action` refuses a tab without one.
+fn with_target(herdr: &Herdr<'_>, preview: &Preview) -> Result<Preview, Failure> {
+    if !preview.target.is_empty() {
+        return Ok(preview.clone());
+    }
+    herdr.wait_preview(10)?.ok_or_else(|| {
+        Failure::new(
+            "the preview in this tab has no CDP target after 10s - is it stuck? 'blueline --reset' replaces it",
+        )
+    })
 }
 
 #[derive(Clone, Copy)]

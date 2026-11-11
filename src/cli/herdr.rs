@@ -65,6 +65,17 @@ fn output(command: &mut Command) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The pane id in `herdr pane split` output.
+fn new_pane_id(split: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(split).ok()?;
+    let id = value.pointer("/result/pane/pane_id")?.as_str()?;
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+fn close_pane(pane: &str) {
+    quietly(Command::new("herdr").args(["pane", "close", pane]));
+}
+
 /// Runs a command quietly, reporting only whether it succeeded.
 fn quietly(command: &mut Command) -> bool {
     command
@@ -141,73 +152,69 @@ impl Herdr<'_> {
     /// it, rather than left as an empty shell the next run would not recognise.
     pub fn open_preview(&self, file: &Path) -> Result<&'static str, Failure> {
         let url = self.server.preview_url(file, "pane");
-        let mut listing = self.read_listing()?;
-        let mut here = listing.browser_here(&self.tab);
-        if here.is_none() && listing.unsure(&self.tab) {
-            sleep(Duration::from_millis(500));
-            listing = self.read_listing()?;
-            here = listing.browser_here(&self.tab);
-        }
-        let mut new_pane = None;
-        let opened = if let Some(browser) = here {
-            // Its failure shows up as the wait below timing out.
-            quietly(self.tb().args(["new-tab", "--browser", &browser, &url]));
-            "in a new tab of this tab's browser"
-        } else {
-            let mut tb_env = OsString::from("BLUELINE_TB=");
-            tb_env.push(&self.tb);
-            let split = output(
-                Command::new("herdr")
-                    .args(["pane", "split", "--pane", &self.pane])
-                    .args([
-                        "--direction",
-                        "right",
-                        "--no-focus",
-                        "--right-click",
-                        "pane",
-                    ])
-                    .arg("--env")
-                    .arg(tb_env)
-                    .arg("--env")
-                    .arg(format!("BLUELINE_URL={url}")),
-            )
-            .ok_or_else(die_panes)?;
-            let pane = serde_json::from_str::<Value>(&split)
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/result/pane/pane_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .filter(|p| !p.is_empty())
-                .ok_or_else(die_panes)?;
-            quietly(Command::new("herdr").args(["pane", "rename", &pane, PANE_LABEL]));
-            let started = quietly(Command::new("herdr").args([
-                "pane",
-                "run",
-                &pane,
-                r#" exec "$BLUELINE_TB" open --no-merge "$BLUELINE_URL""#,
-            ]));
-            if !started {
-                quietly(Command::new("herdr").args(["pane", "close", &pane]));
-                return Err(Failure::new(
-                    "could not start terminal-browser in a new herdr pane - is herdr working?",
-                ));
+        let (opened, new_pane) = match self.browser_here()? {
+            Some(browser) => {
+                // Its failure shows up as the wait below timing out.
+                quietly(self.tb().args(["new-tab", "--browser", &browser, &url]));
+                ("in a new tab of this tab's browser", None)
             }
-            new_pane = Some(pane);
-            "in a new pane"
+            None => ("in a new pane", Some(self.split_pane(&url)?)),
         };
         // A cold start - the first browser since terminal-browser's shared
         // process last exited - takes a few seconds; a warm one under a second.
-        if self.wait_preview(30)?.is_none() {
-            if let Some(pane) = new_pane {
-                quietly(Command::new("herdr").args(["pane", "close", &pane]));
-            }
+        if self.wait_preview(30)?.is_some() {
+            return Ok(opened);
+        }
+        if let Some(pane) = new_pane {
+            close_pane(&pane);
+        }
+        Err(Failure::new(
+            "the preview did not come up in terminal-browser within 30s - is it starting or stuck?",
+        ))
+    }
+
+    /// A browser in this tab to put a new preview tab into, reading the list
+    /// once more when it might be missing one.
+    fn browser_here(&self) -> Result<Option<String>, Failure> {
+        let listing = self.read_listing()?;
+        let here = listing.browser_here(&self.tab);
+        if here.is_some() || !listing.unsure(&self.tab) {
+            return Ok(here);
+        }
+        sleep(Duration::from_millis(500));
+        Ok(self.read_listing()?.browser_here(&self.tab))
+    }
+
+    /// Splits a labelled pane off this one and starts terminal-browser on
+    /// `url` in it, returning the new pane's id.
+    fn split_pane(&self, url: &str) -> Result<String, Failure> {
+        let mut tb_env = OsString::from("BLUELINE_TB=");
+        tb_env.push(&self.tb);
+        let split = output(
+            Command::new("herdr")
+                .args(["pane", "split", "--pane", &self.pane])
+                .args(["--direction", "right", "--no-focus"])
+                .args(["--right-click", "pane", "--env"])
+                .arg(tb_env)
+                .arg("--env")
+                .arg(format!("BLUELINE_URL={url}")),
+        )
+        .ok_or_else(die_panes)?;
+        let pane = new_pane_id(&split).ok_or_else(die_panes)?;
+        quietly(Command::new("herdr").args(["pane", "rename", &pane, PANE_LABEL]));
+        let started = quietly(Command::new("herdr").args([
+            "pane",
+            "run",
+            &pane,
+            r#" exec "$BLUELINE_TB" open --no-merge "$BLUELINE_URL""#,
+        ]));
+        if !started {
+            close_pane(&pane);
             return Err(Failure::new(
-                "the preview did not come up in terminal-browser within 30s - is it starting or stuck?",
+                "could not start terminal-browser in a new herdr pane - is herdr working?",
             ));
         }
-        Ok(opened)
+        Ok(pane)
     }
 
     /// Points an existing preview at `file`. `action -- open` is not the way:
@@ -276,25 +283,37 @@ impl Herdr<'_> {
         }
         let mut gone: Vec<String> = Vec::new();
         for p in &found.previews {
-            if gone.contains(&p.key) {
-                continue;
-            }
-            if p.all && Self::pane_label(&p.pane).as_deref() == Some(PANE_LABEL) {
-                quietly(Command::new("herdr").args(["pane", "close", &p.pane]));
+            if !gone.contains(&p.key) && self.close_one(p) {
                 gone.push(p.key.clone());
-            } else {
-                quietly(
-                    self.tb()
-                        .args(["action", "--browser", &p.key, "--tab", &p.tab])
-                        .args(["--", "tab", "close", &p.tab]),
-                );
             }
         }
+        self.wait_closed(&gone)?;
+        Ok(true)
+    }
+
+    /// Closes one preview: its pane when the pane is ours and holds nothing
+    /// else, otherwise just the tab. True when the whole browser is going.
+    fn close_one(&self, p: &Preview) -> bool {
+        if p.all && Self::pane_label(&p.pane).as_deref() == Some(PANE_LABEL) {
+            close_pane(&p.pane);
+            return true;
+        }
+        quietly(
+            self.tb()
+                .args(["action", "--browser", &p.key, "--tab", &p.tab])
+                .args(["--", "tab", "close", &p.tab]),
+        );
+        false
+    }
+
+    /// Waits for this tab's previews, and the browsers in `gone`, to leave
+    /// the list.
+    fn wait_closed(&self, gone: &[String]) -> Result<(), Failure> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let now = self.resolve(false)?;
-            if now.previews.is_empty() && now.listing.lingering(&gone) == 0 {
-                return Ok(true);
+            if now.previews.is_empty() && now.listing.lingering(gone) == 0 {
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(Failure::new("the preview in this tab did not close"));

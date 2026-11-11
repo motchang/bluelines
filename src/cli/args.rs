@@ -94,87 +94,104 @@ pub fn parse(args: &[OsString]) -> Result<Mode, Failure> {
     match first.as_bytes() {
         b"-h" | b"--help" => Ok(Mode::Help),
         b"-V" | b"--version" => Ok(Mode::Version),
-        b"--stop" | b"--pane" => {
-            if let Some(stray) = rest.first() {
-                return Err(Failure::new(format!(
-                    "unexpected argument after {}: {} - it takes none",
-                    show(first),
-                    show(stray)
-                )));
-            }
-            Ok(if first == "--stop" {
-                Mode::Stop
-            } else {
-                Mode::Pane
-            })
-        }
-        b"--reset" | b"--browser" => {
-            if let Some(file) = rest.first() {
-                not_an_option(file)?;
-            }
-            if let Some(stray) = rest.get(1) {
-                // The form a stray argument is pointed at is the one the sh
-                // implementation named for each flag.
-                let form = if first == "--reset" {
-                    "blueline --reset <file.md>"
-                } else {
-                    "blueline --term <file.md>"
-                };
-                return Err(no_more_args(stray, form));
-            }
-            let file = optional_file(rest.first());
-            Ok(if first == "--reset" {
-                Mode::Reset { file }
-            } else {
-                Mode::Browser { file }
-            })
-        }
-        b"--" => {
-            if rest.is_empty() {
-                return Err(Failure::usage_only());
-            }
-            Ok(Mode::Action {
-                command: rest.to_vec(),
-            })
-        }
-        b"--term" => {
-            // The two ways to get --term wrong that the generic checks would
-            // only answer with the usage line: leaving the file off, and
-            // stacking another flag on it.
-            let file = match rest.first() {
-                None => return Err(term_needs_file()),
-                Some(f) if f.is_empty() => return Err(term_needs_file()),
-                Some(f) if !is_markdown_spelling(f) && starts_with_dash(f) => {
-                    return Err(Failure::new(format!(
-                        "--term takes a file, not {}",
-                        show(f)
-                    )));
-                }
-                Some(f) => f,
-            };
-            if let Some(stray) = rest.get(1) {
-                return Err(no_more_args(stray, "blueline --term <file.md>"));
-            }
-            check_file_spelling(file)?;
-            Ok(Mode::Preview {
-                file: file.clone(),
-                term: true,
-            })
-        }
-        _ => {
-            if first.is_empty() {
-                return Err(Failure::usage_only());
-            }
-            if let Some(stray) = rest.first() {
-                return Err(no_more_args(stray, "blueline --term <file.md>"));
-            }
-            check_file_spelling(first)?;
-            Ok(Mode::Preview {
-                file: first.clone(),
-                term: false,
-            })
-        }
+        b"--stop" | b"--pane" => parse_bare_flag(first, rest),
+        b"--reset" | b"--browser" => parse_optional_file_flag(first, rest),
+        b"--" => parse_action(rest),
+        b"--term" => parse_term(rest),
+        _ => parse_file(first, rest),
     }
+}
+
+fn parse_bare_flag(flag: &OsString, rest: &[OsString]) -> Result<Mode, Failure> {
+    no_arguments(flag, rest)?;
+    Ok(if flag == "--stop" {
+        Mode::Stop
+    } else {
+        Mode::Pane
+    })
+}
+
+/// `--reset [file]` and `--browser [file]`. The form a stray argument is
+/// pointed at is the one the sh implementation named for each flag.
+fn parse_optional_file_flag(flag: &OsString, rest: &[OsString]) -> Result<Mode, Failure> {
+    if flag == "--reset" {
+        let file = optional_file_arg(rest, "blueline --reset <file.md>")?;
+        Ok(Mode::Reset { file })
+    } else {
+        let file = optional_file_arg(rest, "blueline --term <file.md>")?;
+        Ok(Mode::Browser { file })
+    }
+}
+
+/// `--stop` and `--pane` take nothing after them.
+fn no_arguments(flag: &OsStr, rest: &[OsString]) -> Result<(), Failure> {
+    match rest.first() {
+        None => Ok(()),
+        Some(stray) => Err(Failure::new(format!(
+            "unexpected argument after {}: {} - it takes none",
+            show(flag),
+            show(stray)
+        ))),
+    }
+}
+
+/// The optional file of `--reset` and `--browser`.
+fn optional_file_arg(rest: &[OsString], form: &str) -> Result<Option<OsString>, Failure> {
+    if let Some(file) = rest.first() {
+        not_an_option(file)?;
+    }
+    if let Some(stray) = rest.get(1) {
+        return Err(no_more_args(stray, form));
+    }
+    Ok(optional_file(rest.first()))
+}
+
+fn parse_action(rest: &[OsString]) -> Result<Mode, Failure> {
+    if rest.is_empty() {
+        return Err(Failure::usage_only());
+    }
+    Ok(Mode::Action {
+        command: rest.to_vec(),
+    })
+}
+
+/// `--term <file>`. The two ways to get it wrong that the generic checks
+/// would only answer with the usage line - leaving the file off, and stacking
+/// another flag on it - get messages of their own.
+fn parse_term(rest: &[OsString]) -> Result<Mode, Failure> {
+    let file = match rest.first() {
+        Some(f) if !f.is_empty() => f,
+        _ => return Err(term_needs_file()),
+    };
+    if !is_markdown_spelling(file) && starts_with_dash(file) {
+        return Err(Failure::new(format!(
+            "--term takes a file, not {}",
+            show(file)
+        )));
+    }
+    if let Some(stray) = rest.get(1) {
+        return Err(no_more_args(stray, "blueline --term <file.md>"));
+    }
+    check_file_spelling(file)?;
+    Ok(Mode::Preview {
+        file: file.clone(),
+        term: true,
+    })
+}
+
+/// A bare `blueline <file>`.
+fn parse_file(first: &OsString, rest: &[OsString]) -> Result<Mode, Failure> {
+    if first.is_empty() {
+        return Err(Failure::usage_only());
+    }
+    if let Some(stray) = rest.first() {
+        return Err(no_more_args(stray, "blueline --term <file.md>"));
+    }
+    check_file_spelling(first)?;
+    Ok(Mode::Preview {
+        file: first.clone(),
+        term: false,
+    })
 }
 
 fn term_needs_file() -> Failure {
