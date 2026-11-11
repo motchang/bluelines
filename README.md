@@ -29,6 +29,11 @@ Once it is released, either of these will do:
 	cargo install --locked bluelines
 	brew install motchang/tap/blueline
 
+Each [GitHub Release](https://github.com/motchang/bluelines/releases) also has
+prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
+aarch64, statically linked), which need no Rust toolchain: unpack the archive
+for your platform and put `blueline` on PATH.
+
 `cargo install` puts the binary in `~/.cargo/bin`. Make sure that directory is
 on PATH for every shell, not only interactive ones, so that an agent's Bash
 finds it too.
@@ -206,6 +211,29 @@ functions are listed in the job summary, and [octocov](https://github.com/k1LoW/
 comments the totals on pull requests, with the difference from `main`. To check
 locally, install cccc (`cargo install cccc-cli`) and run
 `cccc --config .cccc.toml --table src`.
+
+## Releasing
+
+Releases are built by `.github/workflows/release.yml`. To cut one:
+
+1. Bump `version` in `Cargo.toml`, run `cargo check` so that `Cargo.lock`
+   follows, and merge that change to `main`.
+2. Tag the merge commit with the same version and push the tag:
+
+		git tag v0.1.0
+		git push origin v0.1.0
+
+The workflow refuses a tag that does not match `Cargo.toml`. It builds
+`blueline` for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+(static, so they run on any Linux), `x86_64-apple-darwin` and
+`aarch64-apple-darwin`, and publishes a GitHub Release with release notes
+generated from the merged pull requests. Each target gets
+`blueline-vX.Y.Z-<target>.tar.gz` (the binary, this README and the licenses)
+and a matching `.sha256`; `SHA256SUMS` lists them all. A tag with a suffix,
+such as `v0.2.0-rc.1`, is published as a pre-release.
+
+Pull requests that change the workflow run the builds too and keep the
+archives as workflow artifacts, without publishing anything.
 
 ## License
 
