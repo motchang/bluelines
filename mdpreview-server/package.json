@@ -7,10 +7,10 @@
   },
   "dependencies": {
     "github-markdown-css": "5.9.0",
-    "highlight.js": "^11.11.1",
-    "marked": "^18.0.9",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.1.3",
     "marked-alert": "^2.1.2",
     "marked-gfm-heading-id": "^4.1.4",
-    "mermaid": "^11.16.0"
+    "mermaid": "^12.3.0"
   }
 }
