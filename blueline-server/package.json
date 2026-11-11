@@ -1,5 +1,5 @@
 {
-  "name": "mdpreview-server",
+  "name": "blueline-server",
   "private": true,
   "type": "module",
   "scripts": {
