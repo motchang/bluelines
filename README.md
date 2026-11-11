@@ -24,7 +24,8 @@ release is on crates.io and Homebrew, install it from this repository with
 
 	cargo install --locked --git https://github.com/motchang/bluelines
 
-Once it is released, either of these will do:
+Once it is released, either of these will do (the Homebrew formula installs
+the prebuilt binary, so it needs no Rust toolchain):
 
 	cargo install --locked bluelines
 	brew install motchang/tap/blueline

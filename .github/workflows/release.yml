@@ -2,20 +2,26 @@
 #
 # Pushing a tag `vX.Y.Z` (matching `version` in Cargo.toml) builds one archive
 # per target, writes SHA-256 checksums, and creates the GitHub Release with
-# generated notes. Pull requests that change this workflow, and manual runs,
-# build and upload the archives as workflow artifacts but publish nothing.
+# generated notes. Pull requests that change this workflow or the Homebrew
+# formula, and manual runs, build and upload the archives as workflow artifacts
+# but publish nothing.
 #
 # Assets of release vX.Y.Z:
 #   blueline-vX.Y.Z-<target>.tar.gz          the binary, README and licenses
 #   blueline-vX.Y.Z-<target>.tar.gz.sha256   its checksum (`shasum -a 256 -c`)
 #   SHA256SUMS                               every checksum in one file
+#
+# A release tag without a suffix then pushes Formula/blueline.rb, rendered by
+# packaging/homebrew/formula.sh, to motchang/homebrew-tap, so that
+# `brew install motchang/tap/blueline` gets the new version. That needs the
+# HOMEBREW_TAP_TOKEN secret.
 name: Release
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
-    paths: [.github/workflows/release.yml]
+    paths: [.github/workflows/release.yml, packaging/homebrew/**]
   workflow_dispatch:
 
 permissions:
@@ -133,3 +139,62 @@ jobs:
             --verify-tag \
             --generate-notes \
             "${prerelease[@]}"
+
+  homebrew:
+    name: Homebrew formula
+    needs: [build, publish]
+    # Runs on pull requests and manual runs too (publish is skipped there), to
+    # check that the formula renders; only a release tag pushes it to the tap.
+    if: >-
+      !cancelled() && needs.build.result == 'success' &&
+      (needs.publish.result == 'success' || github.ref_type != 'tag')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: blueline-*
+          path: dist
+          merge-multiple: true
+
+      - name: Render the formula
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          cat dist/*.tar.gz.sha256 > dist/SHA256SUMS
+          packaging/homebrew/formula.sh "$version" dist/SHA256SUMS > blueline.rb
+          ruby -c blueline.rb
+          cat blueline.rb
+
+      # Pre-release tags (vX.Y.Z-rc.1) stay off the tap, as they are not the
+      # version `brew install` should get.
+      - name: Check out the tap
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: motchang/homebrew-tap
+          # A fine-grained token with Contents: read and write on
+          # motchang/homebrew-tap only.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Push the formula to the tap
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p tap/Formula
+          cp blueline.rb tap/Formula/blueline.rb
+          cd tap
+          git add Formula/blueline.rb
+          if git diff --cached --quiet; then
+            echo "Formula/blueline.rb is already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "blueline ${TAG#v}"
+          git push
