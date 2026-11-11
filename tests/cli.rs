@@ -156,7 +156,7 @@ impl Env {
             .args(args)
             .env(
                 "PATH",
-                format!("{}:/usr/bin:/bin", self.path("bin").display()),
+                format!("{}{}", self.path("bin").display(), self.system_path),
             )
             .env("BLUELINE_PORT", self.port.to_string())
             .env("TMPDIR", self.dir.path())
