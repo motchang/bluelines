@@ -1,0 +1,21 @@
+[package]
+name = "bluelines"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Preview markdown, mermaid included, in a browser tab that reloads on save"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/motchang/bluelines"
+readme = "README.md"
+keywords = ["markdown", "preview", "mermaid", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+# Only the Rust port ships to crates.io; the sh/bun implementation stays in the
+# repository until the cut-over.
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE*"]
+
+[[bin]]
+name = "blueline"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "env"] }
