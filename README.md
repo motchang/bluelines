@@ -153,6 +153,17 @@ The render server lives in `blueline-server/` (bun) and logs to
 (`bin/blueline`), so it carries a `-server` suffix instead of sharing the name.
 
 
+## Rust port
+
+blueline is being rewritten in Rust (see #7). The crate lives at the root of
+this repository - package `bluelines`, command `blueline` - next to the sh/bun
+implementation above, which stays the one to install until the cut-over. It
+does not preview anything yet.
+
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+	cargo test
+
 ## License
 
 Licensed under either of
