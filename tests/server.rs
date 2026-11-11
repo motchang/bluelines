@@ -465,7 +465,7 @@ fn assets_are_embedded() {
         ("/assets/github-markdown.css", "text/css; charset=utf-8"),
         ("/assets/hljs-light.css", "text/css; charset=utf-8"),
         ("/assets/hljs-dark.css", "text/css; charset=utf-8"),
-        ("/assets/highlight.min.js", "text/javascript; charset=utf-8"),
+        ("/assets/highlight.js", "text/javascript; charset=utf-8"),
         ("/assets/mermaid.min.js", "text/javascript; charset=utf-8"),
     ] {
         let reply = server.get(path);

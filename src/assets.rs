@@ -37,10 +37,10 @@ const ASSETS: &[(&str, Asset)] = &[
         },
     ),
     (
-        "/assets/highlight.min.js",
+        "/assets/highlight.js",
         Asset {
             content_type: JS,
-            bytes: include_bytes!("../assets/vendor/highlight.min.js"),
+            bytes: include_bytes!("../assets/vendor/highlight.all.min.js"),
         },
     ),
     (
@@ -72,5 +72,16 @@ mod tests {
             assert_eq!(asset.content_type, expected, "{path}");
         }
         assert!(get("/assets/nope.js").is_none());
+    }
+
+    #[test]
+    fn highlighter_carries_every_language() {
+        let script = String::from_utf8_lossy(get("/assets/highlight.js").unwrap().bytes);
+        let grammars = script.matches("grammar compiled for Highlight.js").count();
+        assert_eq!(grammars, 192);
+        for language in ["dockerfile", "powershell", "elixir", "nix"] {
+            let marker = format!("`{language}` grammar compiled");
+            assert!(script.contains(&marker), "{language}");
+        }
     }
 }

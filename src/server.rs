@@ -1028,7 +1028,7 @@ impl Shell<'_> {
   </div>
   {toc}
 </div>
-<script src="/assets/highlight.min.js" nonce="{nonce}"></script>
+<script src="/assets/highlight.js" nonce="{nonce}"></script>
 <script src="/assets/mermaid.min.js" nonce="{nonce}"></script>
 <script nonce="{nonce}">
   hljs.highlightAll();
