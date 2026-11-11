@@ -164,6 +164,16 @@ does not preview anything yet.
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 
+CI also measures the cognitive and cyclomatic complexity of every function in
+`src/` with [cccc](https://github.com/moznion/cccc)
+(`.github/workflows/complexity.yml`). It fails when a function goes over a
+cognitive complexity of 15 or a cyclomatic complexity of 10 (set in
+`.cccc.toml`); split the function if that happens. The 20 most complex
+functions are listed in the job summary, and [octocov](https://github.com/k1LoW/octocov)
+comments the totals on pull requests, with the difference from `main`. To check
+locally, install cccc (`cargo install cccc-cli`) and run
+`cccc --config .cccc.toml --table src`.
+
 ## License
 
 Licensed under either of
