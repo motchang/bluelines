@@ -1,43 +1,67 @@
 # blueline
 
-Previews markdown in an ordinary desktop browser tab, or with `--term` in a
-terminal-browser pane. Embedded mermaid renders too, and saving the file reloads
-the page. Nothing goes out to the network - mermaid.js and highlight.js are both
-served locally.
+A markdown previewer built for terminal and agent workflows. With `--term`,
+blueline puts the preview in a
+[terminal-browser](https://github.com/zenbu-labs/terminal-browser) pane right
+inside your herdr tab, and an agent can drive that page with
+`blueline -- <command>`: snapshot it, read its console, click through it.
+Everything renders offline - mermaid.js and highlight.js ship inside the
+binary, so nothing goes out to the network.
+
+Without `--term`, a file opens in an ordinary desktop browser tab. Embedded
+mermaid renders too, and saving the file reloads the page.
 
 Markdown, syntax highlighting, GitHub alerts and the table of contents are
-rendered on the Bun side; only mermaid, which needs a DOM, is drawn in the
+rendered by the server; only mermaid, which needs a DOM, is drawn in the
 browser. `.md`, `.markdown` and `.mdown` all count as markdown.
 
 ## Install
 
-blueline needs [bun](https://bun.sh), curl and jq, and `open` (macOS) or
-`xdg-open` (Linux) to open a browser tab. lsof is how it finds the render server to
-stop or replace. `--term` and `blueline --` also need herdr and
-[terminal-browser](https://github.com/zenbu-labs/terminal-browser).
+blueline is a single binary. The command is `blueline`; the crate is called
+`bluelines`, because `blueline` was already taken on crates.io. Until the first
+release is on crates.io and Homebrew, install it from this repository with
+[Rust](https://rustup.rs) 1.85 or newer:
 
-With mise, bun is one line:
+	cargo install --locked --git https://github.com/motchang/bluelines
 
-	mise use -g bun@latest
+Once it is released, either of these will do:
 
-`mise activate` only puts bun on PATH in an interactive shell. Link the shim
-into a directory that is on PATH for every shell - ~/bin here - so that blueline
-finds it when it starts the render server from a non-interactive shell, an
-agent's Bash for one.
+	cargo install --locked bluelines
+	brew install motchang/tap/blueline
 
-	ln -sfn ~/.local/share/mise/shims/bun ~/bin/bun
+`cargo install` puts the binary in `~/.cargo/bin`. Make sure that directory is
+on PATH for every shell, not only interactive ones, so that an agent's Bash
+finds it too.
 
-Then clone this repository, install the render server's dependencies and put the
-command on PATH:
+At run time blueline needs `open` (macOS) or `xdg-open` (Linux) to open a
+browser tab. `--term`, `--pane`, `--reset` and `blueline --` also need herdr and
+terminal-browser. Nothing else: there is no bun, curl, jq or lsof to install.
 
-	git clone https://github.com/motchang/bluelines ~/src/github.com/motchang/bluelines
-	cd ~/src/github.com/motchang/bluelines/blueline-server && bun install
-	ln -sf ~/src/github.com/motchang/bluelines/bin/blueline ~/bin/blueline
+### Moving from the bun version
+
+Earlier versions were a shell script (`bin/blueline`) and a bun render server
+(`blueline-server/`), run from a clone of this repository. The Rust binary does
+not recognise a render server the bun version started, so one left running on
+the port would keep serving pages with the old code. Before switching:
+
+1. Stop the old server with the old command, while it is still on PATH:
+
+		blueline --stop
+
+2. Remove the symlink the old install steps made, so that it does not shadow the
+   new binary:
+
+		rm -f ~/bin/blueline
+
+3. Install the Rust binary as above and check that `command -v blueline` points
+   at it.
+
+The clone, and bun itself if nothing else uses it, can go too. `BLUELINE_PORT`
+and the log at `${TMPDIR}/blueline-server.log` are unchanged.
 
 Coming from mdpreview in motchang/dotfiles: run `mdpreview --stop` first, then
-`rm -f ~/bin/mdpreview`. blueline does not recognise a render server mdpreview
-started, so one left on the same port would keep serving with the old code.
-`MDPREVIEW_PORT` is no longer read - set `BLUELINE_PORT` if you had changed it.
+`rm -f ~/bin/mdpreview`, for the same reason. `MDPREVIEW_PORT` is not read - set
+`BLUELINE_PORT` if you had changed it.
 
 ## Usage
 
@@ -148,17 +172,15 @@ shell behind. Neither
 uses `terminal-browser shutdown`, which closes every terminal-browser in the
 session.
 
-The render server lives in `blueline-server/` (bun) and logs to
-`${TMPDIR}/blueline-server.log`. It sits at a different layer from the command
-(`bin/blueline`), so it carries a `-server` suffix instead of sharing the name.
+The render server is the same binary, started in the background as
+`blueline serve`, and logs to `${TMPDIR}/blueline-server.log`. A `blueline` from
+another install or version holding the port is stopped and replaced, so the
+page always renders with the code of the command that asked for it.
 
+## Development
 
-## Rust port
-
-blueline is being rewritten in Rust (see #7). The crate lives at the root of
-this repository - package `bluelines`, command `blueline` - next to the sh/bun
-implementation above, which stays the one to install until the cut-over. It
-does not preview anything yet.
+The crate lives at the root of this repository - package `bluelines`, command
+`blueline`.
 
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings

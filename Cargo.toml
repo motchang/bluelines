@@ -9,8 +9,6 @@ repository = "https://github.com/motchang/bluelines"
 readme = "README.md"
 keywords = ["markdown", "preview", "mermaid", "cli"]
 categories = ["command-line-utilities", "text-processing"]
-# Only the Rust port ships to crates.io; the sh/bun implementation stays in the
-# repository until the cut-over.
 include = ["/src", "/assets", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE*"]
 
 [[bin]]

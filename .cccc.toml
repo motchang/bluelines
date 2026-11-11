@@ -1,6 +1,5 @@
 # Code complexity settings, read by CI (.github/workflows/complexity.yml).
-# Only the Rust crate is measured; the sh/bun implementation is left out until
-# the cut-over. Integration tests under tests/ are excluded because they repeat
+# Integration tests under tests/ are excluded because they repeat
 # the same shape of assertion and say little about readability. Unit tests in
 # `#[cfg(test)]` modules cannot be excluded by path, so they are measured too.
 languages = ["rust"]
