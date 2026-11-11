@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: "bun"
-    directory: "/mdpreview-server"
+    directory: "/blueline-server"
     schedule:
       interval: "weekly"
     groups:

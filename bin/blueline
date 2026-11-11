@@ -1,15 +1,15 @@
 #!/bin/sh
 # Preview a markdown file (mermaid included) in the desktop browser, or in a
 # terminal-browser pane.
-#   mdpreview README.md            # a desktop browser tab
-#   mdpreview --browser [file.md]  # the same; with no file, the latest one
-#   mdpreview --term README.md     # a terminal-browser pane in this herdr tab
-#   mdpreview -- snapshot          # a `terminal-browser action` command, aimed
-#   mdpreview -- console           # at this tab's pane preview - no browser
-#   mdpreview -- screenshot /tmp/preview.png   # key or tab id to pass around
-#   mdpreview --pane
-#   mdpreview --reset [file.md]
-#   mdpreview --stop
+#   blueline README.md            # a desktop browser tab
+#   blueline --browser [file.md]  # the same; with no file, the latest one
+#   blueline --term README.md     # a terminal-browser pane in this herdr tab
+#   blueline -- snapshot          # a `terminal-browser action` command, aimed
+#   blueline -- console           # at this tab's pane preview - no browser
+#   blueline -- screenshot /tmp/preview.png   # key or tab id to pass around
+#   blueline --pane
+#   blueline --reset [file.md]
+#   blueline --stop
 #
 # Starts a local render server on first use and reuses it afterwards; the page
 # live-reloads when the file changes. Nothing in that server knows about herdr -
@@ -25,30 +25,31 @@
 # run from a plain terminal where that list has nothing to say.
 set -e
 
-port=${MDPREVIEW_PORT:-43128}
+port=${BLUELINE_PORT:-43128}
 base="http://127.0.0.1:${port}"
 
 self=$0
-# Follow the ~/bin symlink back to the copy inside the dotfiles repo.
+# Follow the ~/bin symlink back to the copy inside the bluelines repo.
 if command -v readlink >/dev/null 2>&1 && readlink -f "$self" >/dev/null 2>&1; then
   self=$(readlink -f "$self")
 fi
-root=$(CDPATH= cd -- "$(dirname -- "$self")/../mdpreview-server" && pwd)
+root=$(CDPATH= cd -- "$(dirname -- "$self")/../blueline-server" && pwd)
 
 # The render servers listening on ${port}, whatever directory they were started
 # from. Both halves of that matter. Matching only the directory reaches servers
 # this command was not asked about - a second checkout, or this one under another
-# MDPREVIEW_PORT, which the port is a knob precisely so you can run. Matching only
+# BLUELINE_PORT, which the port is a knob precisely so you can run. Matching only
 # the port reaches whatever unrelated program happens to be holding it. Neither is
 # ours to kill; the one on this port that is a render server is.
 #
 # Not anchored on `bun run`, so the bare `bun` form matches too, and not anchored
 # on ${root} either: a server started before this directory was renamed, or from
 # another checkout, answers /health here indistinguishably from ours and has to be
-# reachable to be retired.
+# reachable to be retired. That includes a server from before the rename to
+# blueline, still running out of a mdpreview-server directory on the same port.
 server_pids() {
   for pid in $(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null); do
-    if ps -o command= -p "$pid" 2>/dev/null | grep -qE 'mdpreview(-server)?/server\.ts'; then
+    if ps -o command= -p "$pid" 2>/dev/null | grep -qE '(blueline-server|mdpreview(-server)?)/server\.ts'; then
       printf '%s\n' "$pid"
     fi
   done
@@ -97,9 +98,9 @@ require_tb() {
     return 0
   fi
   if [ "$1" = --term ]; then
-    echo "mdpreview: terminal-browser is not on PATH - install it (see the dotfiles README); 'mdpreview <file.md>' opens a browser tab without it" >&2
+    echo "blueline: terminal-browser is not on PATH - install it (https://github.com/zenbu-labs/terminal-browser); 'blueline <file.md>' opens a browser tab without it" >&2
   else
-    printf '%s\n' "mdpreview: $1 needs terminal-browser, which is not on PATH - install it (see the dotfiles README)" >&2
+    printf '%s\n' "blueline: $1 needs terminal-browser, which is not on PATH - install it (https://github.com/zenbu-labs/terminal-browser)" >&2
   fi
   exit 1
 }
@@ -112,34 +113,34 @@ not_an_option() {
   case $1 in
     *.md | *.markdown | *.mdown | */*) ;;
     -*)
-      printf '%s\n' "mdpreview: unknown option: $1" >&2
+      printf '%s\n' "blueline: unknown option: $1" >&2
       usage
       ;;
   esac
 }
 
 # Refuses anything after the file. Left unchecked it was dropped without a
-# word, so `mdpreview README.md --term` opened a browser tab and looked like
+# word, so `blueline README.md --term` opened a browser tab and looked like
 # --term had failed to do anything. $1 is the stray argument, $2 the form that
 # puts the flag where it is read.
 no_more_args() {
-  printf '%s\n' "mdpreview: unexpected argument after the file: $1 - flags go first ('$2')" >&2
+  printf '%s\n' "blueline: unexpected argument after the file: $1 - flags go first ('$2')" >&2
   exit 1
 }
 
 die_panes() {
-  echo "mdpreview: could not split a herdr pane - is herdr working?" >&2
+  echo "blueline: could not split a herdr pane - is herdr working?" >&2
   exit 1
 }
 
 die_ls() {
-  echo "mdpreview: could not read the terminal-browser list - is terminal-browser working?" >&2
+  echo "blueline: could not read the terminal-browser list - is terminal-browser working?" >&2
   exit 1
 }
 
 require_tab() {
   if [ "$scoped" != 1 ]; then
-    printf '%s\n' "mdpreview: $1 needs a herdr pane to scope to - there is no tab to look in from a plain terminal" >&2
+    printf '%s\n' "blueline: $1 needs a herdr pane to scope to - there is no tab to look in from a plain terminal" >&2
     exit 1
   fi
 }
@@ -164,7 +165,7 @@ read_listing() {
 # A preview is a tab on this render server, and nothing else is: a browser in
 # this tab that the user opened for something of their own is not one, and
 # navigating it would throw away whatever they had open. Matching on the URL is
-# also what keeps a server on another MDPREVIEW_PORT out of it - its previews are
+# also what keeps a server on another BLUELINE_PORT out of it - its previews are
 # that server's to manage. `/?` and a bare `/` are the two shapes a preview URL
 # takes, links between previewed files included; /health and the other
 # endpoints are not previews even though they are on the same server.
@@ -252,7 +253,7 @@ resolve_preview() {
 
 require_deps() {
   if [ ! -d "${root}/node_modules" ]; then
-    printf '%s\n' "mdpreview: dependencies missing - run 'bun install' in ${root}" >&2
+    printf '%s\n' "blueline: dependencies missing - run 'bun install' in ${root}" >&2
     exit 1
   fi
 }
@@ -264,7 +265,7 @@ require_deps() {
 resolve_file() {
   dir=$(CDPATH= cd -- "$(dirname -- "$1")" 2>/dev/null && pwd) || dir=""
   if [ -z "$dir" ] || [ ! -f "${dir}/$(basename -- "$1")" ]; then
-    printf '%s\n' "mdpreview: no such file: $1" >&2
+    printf '%s\n' "blueline: no such file: $1" >&2
     exit 1
   fi
   file="${dir}/$(basename -- "$1")"
@@ -277,7 +278,7 @@ ensure_server() {
   # does not have, silently. Retiring it here is what keeps the health check below
   # meaning "our server is up" rather than "something answers".
   #
-  # Scoped to this port: our own copy serving another MDPREVIEW_PORT is a separate
+  # Scoped to this port: our own copy serving another BLUELINE_PORT is a separate
   # preview, not a stale one, and has no bearing on who should hold this one.
   #
   # Without lsof the holder cannot be identified, and this carries on anyway
@@ -288,7 +289,7 @@ ensure_server() {
   # as nothing more than a page that will not change.
   if ! command -v lsof >/dev/null 2>&1 &&
       curl -fsS -m 1 "${base}/health" >/dev/null 2>&1; then
-    printf '%s\n' "mdpreview: no lsof, so the server already on ${port} cannot be identified - if the preview renders stale, stop that process by hand" >&2
+    printf '%s\n' "blueline: no lsof, so the server already on ${port} cannot be identified - if the preview renders stale, stop that process by hand" >&2
   fi
   for pid in $(server_pids); do
     if ! server_is_ours "$pid"; then
@@ -298,12 +299,12 @@ ensure_server() {
   done
   if ! curl -fsS -m 1 "${base}/health" >/dev/null 2>&1; then
     # --retry-connrefused lets the first request wait out the server's startup.
-    nohup bun run "${root}/server.ts" >>"${TMPDIR:-/tmp}/mdpreview-server.log" 2>&1 &
+    nohup bun run "${root}/server.ts" >>"${TMPDIR:-/tmp}/blueline-server.log" 2>&1 &
     # Each connection-refused retry would otherwise print its own error, so the
     # retry output is dropped and the final failure is reported here instead.
     if ! curl -fsS --retry 30 --retry-delay 0 --retry-connrefused -m 10 \
         "${base}/health" >/dev/null 2>/dev/null; then
-      printf '%s\n' "mdpreview: server did not start on ${base} - see ${TMPDIR:-/tmp}/mdpreview-server.log" >&2
+      printf '%s\n' "blueline: server did not start on ${base} - see ${TMPDIR:-/tmp}/blueline-server.log" >&2
       exit 1
     fi
   fi
@@ -357,7 +358,7 @@ resume_current_file() {
     # A pane mode finding no pane-side file while a browser tab is holding one is
     # not "nothing is being previewed" - something is, and saying otherwise is
     # false in exactly the state it prints in. A browser tab never moves the
-    # current file, on purpose, and a tab is what a plain `mdpreview <file.md>`
+    # current file, on purpose, and a tab is what a plain `blueline <file.md>`
     # opens. --reset only gets here with a pane preview in this tab, so this is a
     # server that has lost the pane's file - restarted since, say - while a tab
     # kept one. What --reset needs is a file to rebuild onto, so it asks for one
@@ -366,16 +367,16 @@ resume_current_file() {
     # With nothing at all, the advice depends on who is asking: --reset rebuilds
     # a pane, so pointing it at the default would open a tab it cannot reset.
     if [ "$1" != recent ] && [ -n "$recent" ]; then
-      printf '%s\n' "mdpreview: nothing is being previewed in a pane - ${recent} is open in a browser tab, which --reset does not rebuild; name a file: 'mdpreview --reset <file.md>'" >&2
+      printf '%s\n' "blueline: nothing is being previewed in a pane - ${recent} is open in a browser tab, which --reset does not rebuild; name a file: 'blueline --reset <file.md>'" >&2
     elif [ "$1" != recent ]; then
-      echo "mdpreview: nothing is being previewed in a pane - run 'mdpreview --term <file.md>'" >&2
+      echo "blueline: nothing is being previewed in a pane - run 'blueline --term <file.md>'" >&2
     else
-      echo "mdpreview: nothing is being previewed - run 'mdpreview <file.md>'" >&2
+      echo "blueline: nothing is being previewed - run 'blueline <file.md>'" >&2
     fi
     exit 1
   fi
   if [ ! -f "$file" ]; then
-    printf '%s\n' "mdpreview: the previewed file is gone: $file" >&2
+    printf '%s\n' "blueline: the previewed file is gone: $file" >&2
     exit 1
   fi
   require_deps
@@ -422,7 +423,7 @@ set_file() {
   if ! reply=$(jq -n --arg path "$file" --argjson current "$current" \
         '{path: $path, current: $current}' \
       | curl -sS -m 10 -X POST -H 'content-type: application/json' --data @- "${base}/open"); then
-    printf '%s\n' "mdpreview: no reply from the render server on ${base} - ${file} may already have reached it" >&2
+    printf '%s\n' "blueline: no reply from the render server on ${base} - ${file} may already have reached it" >&2
     exit 1
   fi
   # A reply that is not the object expected here has to read as a refusal and
@@ -455,7 +456,7 @@ set_file() {
   if [ -z "$reason" ]; then
     reason="it refused and said nothing about why"
   fi
-  printf '%s\n' "mdpreview: the render server on ${port} would not take ${file} - ${reason}" >&2
+  printf '%s\n' "blueline: the render server on ${port} would not take ${file} - ${reason}" >&2
   exit 1
 }
 
@@ -506,8 +507,8 @@ before_deadline() {
 
 # Waits up to $1 seconds for this tab's preview to show up in `terminal-browser
 # ls` with a CDP target, and leaves it in `key`, `tabid` and `target`. A run
-# that returned before then would leave the next one - `mdpreview --term a.md &&
-# mdpreview -- snapshot` - finding no preview and refusing, or opening another.
+# that returned before then would leave the next one - `blueline --term a.md &&
+# blueline -- snapshot` - finding no preview and refusing, or opening another.
 # Listed is not enough: a tab is listed before its page has a target, and
 # `action` refuses it until then, so a preview that only counts as up once it is
 # listed hands that refusal to whatever runs next.
@@ -527,7 +528,7 @@ wait_preview() {
 # lets close_previews take a pane down. A pane that merely runs a browser full
 # of previews may be the user's own shell, running `terminal-browser open` in
 # the foreground; closing it would take the shell and anything else in it.
-pane_label=mdpreview
+pane_label=blueline
 
 # Puts the preview on screen in this tab when it has none. Sets `opened` to say
 # where, for the message.
@@ -578,7 +579,7 @@ open_preview() {
   else
     split=$(herdr pane split --pane "$HERDR_PANE_ID" --direction right \
         --no-focus --right-click pane \
-        --env "MDPREVIEW_TB=${tb}" --env "MDPREVIEW_URL=$(preview_url pane)") \
+        --env "BLUELINE_TB=${tb}" --env "BLUELINE_URL=$(preview_url pane)") \
       || die_panes
     new=$(printf '%s' "$split" | jq -r '.result.pane.pane_id // empty' 2>/dev/null) || new=''
     if [ -z "$new" ]; then
@@ -587,9 +588,9 @@ open_preview() {
     herdr pane rename "$new" "$pane_label" >/dev/null 2>&1 || true
     # shellcheck disable=SC2016 # expanded by the new pane's shell, not this one
     if ! herdr pane run "$new" \
-        ' exec "$MDPREVIEW_TB" open --no-merge "$MDPREVIEW_URL"' >/dev/null; then
+        ' exec "$BLUELINE_TB" open --no-merge "$BLUELINE_URL"' >/dev/null; then
       herdr pane close "$new" >/dev/null 2>&1 || true
-      printf '%s\n' "mdpreview: could not start terminal-browser in a new herdr pane - is herdr working?" >&2
+      printf '%s\n' "blueline: could not start terminal-browser in a new herdr pane - is herdr working?" >&2
       exit 1
     fi
     opened="in a new pane"
@@ -600,7 +601,7 @@ open_preview() {
     if [ -n "$new" ]; then
       herdr pane close "$new" >/dev/null 2>&1 || true
     fi
-    echo "mdpreview: the preview did not come up in terminal-browser within 30s - is it starting or stuck?" >&2
+    echo "blueline: the preview did not come up in terminal-browser within 30s - is it starting or stuck?" >&2
     exit 1
   fi
 }
@@ -643,8 +644,8 @@ navigate_preview() {
 # A browser holding nothing but previews, in a pane open_preview split for it,
 # goes with its pane, closed by herdr rather than left to follow its browser
 # out. Any other pane stays, and only the preview tabs are closed: a browser
-# with tabs of its own keeps them, and a pane mdpreview did not split is not
-# mdpreview's to close, whatever is running in it. A browser there that held
+# with tabs of its own keeps them, and a pane blueline did not split is not
+# blueline's to close, whatever is running in it. A browser there that held
 # nothing but previews exits once its last tab is closed - terminal-browser does
 # that by itself - and the pane is left with whatever started it, a shell as
 # like as not.
@@ -681,7 +682,7 @@ close_previews() {
     before_deadline || break
     sleep 0.2
   done
-  echo "mdpreview: the preview in this tab did not close" >&2
+  echo "blueline: the preview in this tab did not close" >&2
   exit 1
 }
 
@@ -752,7 +753,7 @@ find_opener() {
 preview_in_browser() {
   opener=$(find_opener)
   if [ -z "$opener" ]; then
-    printf '%s\n' "mdpreview: no way to open a browser - neither open nor xdg-open is on PATH; the preview is at $(preview_url tab)" >&2
+    printf '%s\n' "blueline: no way to open a browser - neither open nor xdg-open is on PATH; the preview is at $(preview_url tab)" >&2
     exit 1
   fi
   # Asked before the file is handed over, and that ordering is not cosmetic:
@@ -763,15 +764,15 @@ preview_in_browser() {
   showing=$(tab_viewers)
   set_file aside
   if [ "$showing" -gt 0 ]; then
-    printf '%s\n' "mdpreview: ${file} is already open in a browser tab - reloaded that instead of opening another"
+    printf '%s\n' "blueline: ${file} is already open in a browser tab - reloaded that instead of opening another"
     return 0
   fi
   "$opener" "$(preview_url tab)"
-  printf '%s\n' "mdpreview: previewing ${file} in a browser tab"
+  printf '%s\n' "blueline: previewing ${file} in a browser tab"
 }
 
 usage() {
-  echo "usage: mdpreview <file.md> | --browser [file.md] | --term <file.md> | -- <terminal-browser action command> | --pane | --reset [file.md] | --stop" >&2
+  echo "usage: blueline <file.md> | --browser [file.md] | --term <file.md> | -- <terminal-browser action command> | --pane | --reset [file.md] | --stop" >&2
   exit 1
 }
 
@@ -780,7 +781,7 @@ if [ "$1" = "--stop" ]; then
   # killing by directory alone is what this exists to avoid. Saying so beats
   # reporting a stop that did not happen.
   if ! command -v lsof >/dev/null 2>&1; then
-    printf '%s\n' "mdpreview: lsof is needed to find the server on ${port}" >&2
+    printf '%s\n' "blueline: lsof is needed to find the server on ${port}" >&2
     exit 1
   fi
   # This tab's preview goes too: with the server gone it is a page that will
@@ -809,16 +810,16 @@ if [ "$1" = "--stop" ]; then
     esac
   fi
   if stop_server; then
-    printf '%s\n' "mdpreview: stopped the server on ${port}${closed}"
+    printf '%s\n' "blueline: stopped the server on ${port}${closed}"
   else
-    printf '%s\n' "mdpreview: no server on ${port}${closed}"
+    printf '%s\n' "blueline: no server on ${port}${closed}"
   fi
   exit "$status"
 fi
 
 if [ "$1" = "--pane" ]; then
   # Names the herdr panes holding this tab's previews, one id per line, for the
-  # `herdr pane` commands - resizing one, say. Not renaming it: the `mdpreview`
+  # `herdr pane` commands - resizing one, say. Not renaming it: the `blueline`
   # label is what lets --reset and --stop close the pane, and a pane renamed
   # away from it keeps running with only its tabs closed. A browser that also holds
   # tabs of its own is named too, so closing what this prints can take those
@@ -827,7 +828,7 @@ if [ "$1" = "--pane" ]; then
   require_tb --pane
   resolve_preview settle
   if [ -z "$found" ]; then
-    echo "mdpreview: no preview in this tab - run 'mdpreview --term <file.md>' first" >&2
+    echo "blueline: no preview in this tab - run 'blueline --term <file.md>' first" >&2
     exit 1
   fi
   printf '%s\n' "$found" | cut -f3 | awk '!seen[$0]++'
@@ -843,7 +844,7 @@ if [ "$1" = "--reset" ]; then
   require_tb --reset
   not_an_option "$2"
   if [ "$#" -gt 2 ]; then
-    no_more_args "$3" "mdpreview --reset <file.md>"
+    no_more_args "$3" "blueline --reset <file.md>"
   fi
 
   if [ -n "$2" ]; then
@@ -859,7 +860,7 @@ if [ "$1" = "--reset" ]; then
     # --reset can replace. Naming a file is asking for a pane, and is honoured.
     resolve_preview settle
     if [ -z "$found" ]; then
-      echo "mdpreview: no pane preview in this tab to reset - reload a browser tab yourself; 'mdpreview --term <file.md>' opens a pane" >&2
+      echo "blueline: no pane preview in this tab to reset - reload a browser tab yourself; 'blueline --term <file.md>' opens a pane" >&2
       exit 1
     fi
     # Reset onto whatever the pane modes last opened, which is what is on screen
@@ -879,7 +880,7 @@ if [ "$1" = "--reset" ]; then
 
   close_previews || [ "$?" = 2 ]
   open_preview
-  printf '%s\n' "mdpreview: reset ok - previewing ${file} ${opened}"
+  printf '%s\n' "blueline: reset ok - previewing ${file} ${opened}"
   exit 0
 fi
 
@@ -890,7 +891,7 @@ if [ "$1" = "--browser" ]; then
   # and no terminal-browser are involved, so it needs no herdr tab either.
   not_an_option "$2"
   if [ "$#" -gt 2 ]; then
-    no_more_args "$3" "mdpreview --term <file.md>"
+    no_more_args "$3" "blueline --term <file.md>"
   fi
   if [ -n "$2" ]; then
     require_deps
@@ -937,29 +938,29 @@ if [ "$1" = "--" ]; then
   # without being asked, so a filename with a \t in it would be reported as a
   # different name than the one that was typed.
   if [ "$scoped" != 1 ]; then
-    printf '%s\n' "mdpreview: '$1' would be run against a terminal-browser preview, and outside a herdr session there is none - the preview is a plain browser tab." >&2
+    printf '%s\n' "blueline: '$1' would be run against a terminal-browser preview, and outside a herdr session there is none - the preview is a plain browser tab." >&2
     exit 1
   fi
-  require_tb "'mdpreview -- <command>'"
+  require_tb "'blueline -- <command>'"
   resolve_preview settle
   if [ -z "$key" ]; then
-    # The desktop tab is named here because it is what a plain `mdpreview
+    # The desktop tab is named here because it is what a plain `blueline
     # <file.md>` opens, and this cannot reach it: it is not terminal-browser's,
     # so a preview opened moments ago still leaves this with nothing to drive
     # and reads as no preview at all. Without saying so, rerunning that same
     # command would look like the fix and only open another tab.
-    echo "mdpreview: no preview in this tab - run 'mdpreview --term <file.md>' to open one; a preview opened without --term is a desktop tab and cannot be driven from here" >&2
+    echo "blueline: no preview in this tab - run 'blueline --term <file.md>' to open one; a preview opened without --term is a desktop tab and cannot be driven from here" >&2
     exit 1
   fi
   # A preview still starting has no CDP target, and action refuses it until it
   # has one - waited for here so that a command run right after the preview
   # was opened elsewhere does not fail on a page about to be there.
   if [ -z "$target" ] && ! wait_preview 10; then
-    echo "mdpreview: the preview in this tab has no CDP target after 10s - is it stuck? 'mdpreview --reset' replaces it" >&2
+    echo "blueline: the preview in this tab has no CDP target after 10s - is it stuck? 'blueline --reset' replaces it" >&2
     exit 1
   fi
   # `done` clears the "agent is acting" marker the action leaves on the tab. Refs
-  # from a snapshot survive it, so a later `mdpreview -- click @e3` still works,
+  # from a snapshot survive it, so a later `blueline -- click @e3` still works,
   # and running it after every command keeps the marker from sitting on a
   # preview nobody is driving any more. The command's own status is the one
   # that counts.
@@ -971,23 +972,23 @@ fi
 
 # --term asks for a terminal-browser pane in this herdr tab, and is refused up
 # front outside one rather than quietly turned into a browser tab: whoever wrote
-# it wants a page that `mdpreview --` can drive, and a desktop tab is not that.
+# it wants a page that `blueline --` can drive, and a desktop tab is not that.
 # Refused before the server is started, since nothing would be shown on it.
 term=0
 if [ "$1" = "--term" ]; then
   term=1
   shift
   if [ "$scoped" != 1 ]; then
-    echo "mdpreview: --term opens a terminal-browser pane in this herdr tab, and outside a herdr session there is none - drop --term to open a browser tab" >&2
+    echo "blueline: --term opens a terminal-browser pane in this herdr tab, and outside a herdr session there is none - drop --term to open a browser tab" >&2
     exit 1
   fi
   # The two ways to get --term wrong that the generic checks below would only
   # answer with the usage line: leaving the file off, and stacking another flag
   # on it. Markdown spellings go through first, as in not_an_option.
   case ${1:-} in
-    '') echo "mdpreview: --term needs a file: 'mdpreview --term <file.md>'" >&2; exit 1 ;;
+    '') echo "blueline: --term needs a file: 'blueline --term <file.md>'" >&2; exit 1 ;;
     *.md | *.markdown | *.mdown | */*) ;;
-    -*) printf '%s\n' "mdpreview: --term takes a file, not $1" >&2; exit 1 ;;
+    -*) printf '%s\n' "blueline: --term takes a file, not $1" >&2; exit 1 ;;
   esac
 fi
 
@@ -995,22 +996,22 @@ if [ -z "$1" ]; then
   usage
 fi
 if [ "$#" -gt 1 ]; then
-  no_more_args "$2" "mdpreview --term <file.md>"
+  no_more_args "$2" "blueline --term <file.md>"
 fi
 
 # A markdown path is the only thing taken as a file. That is decided on the
-# spelling rather than on whether the path happens to exist, so `mdpreview
+# spelling rather than on whether the path happens to exist, so `blueline
 # snapshot` - the old way of driving the preview - cannot turn into a preview of
 # a file called `snapshot` that someone left in the cwd. Write `./snapshot` to
-# mean the file, and `mdpreview -- snapshot` to mean the command.
+# mean the file, and `blueline -- snapshot` to mean the command.
 case $1 in
   *.md | *.markdown | *.mdown | */*) ;;
   -*)
-    printf '%s\n' "mdpreview: unknown option: $1" >&2
+    printf '%s\n' "blueline: unknown option: $1" >&2
     usage
     ;;
   *)
-    printf '%s\n' "mdpreview: '$1' is not a markdown path - name a file with a .md suffix or a ./ prefix, or put a command for the preview after --: 'mdpreview -- $*'" >&2
+    printf '%s\n' "blueline: '$1' is not a markdown path - name a file with a .md suffix or a ./ prefix, or put a command for the preview after --: 'blueline -- $*'" >&2
     exit 1
     ;;
 esac
@@ -1032,11 +1033,11 @@ resolve_preview settle
 # The JSON that terminal-browser prints is of no use to whoever asked for a
 # preview, and an agent reading it pays for every field of it. One line saying
 # what happened covers it; failures still come through on stderr, and the
-# pane is a `mdpreview --pane` away for anyone who wants it.
+# pane is a `blueline --pane` away for anyone who wants it.
 set_file
 if [ -z "$key" ]; then
   open_preview
-  printf '%s\n' "mdpreview: previewing ${file} ${opened}"
+  printf '%s\n' "blueline: previewing ${file} ${opened}"
   exit 0
 fi
 
@@ -1044,8 +1045,8 @@ fi
 # answering CDP - is replaced rather than reported: the caller asked to see a
 # file, and a new preview shows it.
 if ! navigate_preview; then
-  printf '%s\n' "mdpreview: the preview in this tab did not answer - replacing it" >&2
+  printf '%s\n' "blueline: the preview in this tab did not answer - replacing it" >&2
   close_previews || [ "$?" = 2 ]
   open_preview
 fi
-printf '%s\n' "mdpreview: previewing ${file}"
+printf '%s\n' "blueline: previewing ${file}"

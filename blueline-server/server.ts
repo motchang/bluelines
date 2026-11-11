@@ -34,11 +34,11 @@ import { Marked } from "marked";
 import markedAlert from "marked-alert";
 import { getHeadingList, gfmHeadingId } from "marked-gfm-heading-id";
 
-// Coerce with || rather than ??: an exported-but-empty MDPREVIEW_PORT would
+// Coerce with || rather than ??: an exported-but-empty BLUELINE_PORT would
 // otherwise become Number("") === 0 and make Bun listen on a random port, while
-// bin/mdpreview's ${MDPREVIEW_PORT:-43128} still talks to 43128.
-const PORT = Number(process.env.MDPREVIEW_PORT) || 43128;
-// .mdown is here because bin/mdpreview's own classifier takes it as a markdown
+// bin/blueline's ${BLUELINE_PORT:-43128} still talks to 43128.
+const PORT = Number(process.env.BLUELINE_PORT) || 43128;
+// .mdown is here because bin/blueline's own classifier takes it as a markdown
 // path. Without it the command advertised a spelling this then refused, and the
 // refusal named the file rather than the mismatch that caused it.
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdown"]);
@@ -162,10 +162,10 @@ const images = new Map<string, string>();
 // The file a bare / renders, and the file the empty-keyed reload channel
 // follows. Only /open with current !== false moves it - see registerFile for why
 // a browser-tab preview deliberately does not. That makes it the file a pane
-// (`mdpreview --term`) last opened, and null on a server that has only ever
+// (`blueline --term`) last opened, and null on a server that has only ever
 // opened browser tabs, which is now the ordinary case.
 let lastOpened: string | null = null;
-// The most recent /open of any kind, current or not. bin/mdpreview's --browser
+// The most recent /open of any kind, current or not. bin/blueline's --browser
 // resumes from this: a browser tab never sets lastOpened, so without a second
 // field a server that had only ever served tabs would report nothing being
 // previewed while holding a tab's worth of it.
@@ -363,8 +363,8 @@ function startWatching(key: string): void {
 // This is the recovery route for a channel startWatching gave up on: a preview
 // whose directory went away is connected and silent, and comes back the moment
 // something registers the path again. /open is the right place to do it from
-// because bin/mdpreview re-registers the file on every preview, so the thing
-// anyone does when a preview looks dead - run mdpreview again - is already the
+// because bin/blueline re-registers the file on every preview, so the thing
+// anyone does when a preview looks dead - run blueline again - is already the
 // fix, with nothing new to know.
 function rearmWatching(key: string): void {
   const channel = channels.get(key);
@@ -408,14 +408,14 @@ function unsubscribe(key: string, client: ReadableStreamDefaultController<Uint8A
 }
 
 // Browser tabs currently showing a path, as distinct from herdr panes.
-// bin/mdpreview asks before opening a tab, so that previewing the same file twice
+// bin/blueline asks before opening a tab, so that previewing the same file twice
 // does not stack two tabs on the same preview.
 //
 // Panes are excluded on purpose. A pane already showing the file is not a reason
 // to refuse someone who asked for a browser tab, and counting it would make the
 // command report a tab that does not exist. Nothing about the connection says
 // which is which, so each page declares it in its own /events URL, put there by
-// whichever half of bin/mdpreview opened it.
+// whichever half of bin/blueline opened it.
 //
 // A page only counts while its EventSource is connected, so a background tab
 // that Chrome has discarded or frozen reads as absent and a second tab opens.
@@ -448,7 +448,7 @@ function retargetCurrent(): void {
 
 // Registers a path and, unless told otherwise, makes it the current one.
 //
-// The split exists for browser-tab previews - what bin/mdpreview opens unless
+// The split exists for browser-tab previews - what bin/blueline opens unless
 // told --term - and it is not visible from either side alone.
 // A browser preview has to be able to open B without disturbing a herdr pane
 // showing A. Panes navigate to their own ?file= URL, so lastOpened does not
@@ -482,7 +482,7 @@ async function registerFile(rawPath: string, makeCurrent: boolean): Promise<stri
 type Target = { ok: true; key: string; file: string | null } | { ok: false };
 
 function targetFor(url: URL): Target {
-  // searchParams has already percent-decoded, which is what bin/mdpreview's
+  // searchParams has already percent-decoded, which is what bin/blueline's
   // @uri encoding on the way out is for: paths hold spaces, & and # as readily
   // as anything else, and an unencoded # would cut the path in half before it
   // ever reached the server.
@@ -703,7 +703,7 @@ async function renderPage(url: URL): Promise<Response> {
   const events = eventsUrl(url);
   const file = target.file;
   if (!file) {
-    return htmlResponse(nonce, "mdpreview", "", "<p>No file selected.</p>", events);
+    return htmlResponse(nonce, "blueline", "", "<p>No file selected.</p>", events);
   }
   let source: string;
   try {
@@ -976,7 +976,7 @@ const server = Bun.serve({
 
     if (pathname === "/viewers") {
       // Not for pages to call. It answers a question about what the user has
-      // open, and no page has a use for the answer - bin/mdpreview is what asks,
+      // open, and no page has a use for the answer - bin/blueline is what asks,
       // before deciding whether to open a tab.
       //
       // The check is weaker here than on /open, and worth being honest about.
@@ -1064,4 +1064,4 @@ if (initial) {
   await registerFile(initial, true);
 }
 
-console.log(`mdpreview-server listening on http://127.0.0.1:${server.port}`);
+console.log(`blueline-server listening on http://127.0.0.1:${server.port}`);
