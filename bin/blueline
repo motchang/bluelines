@@ -45,11 +45,10 @@ root=$(CDPATH= cd -- "$(dirname -- "$self")/../blueline-server" && pwd)
 # Not anchored on `bun run`, so the bare `bun` form matches too, and not anchored
 # on ${root} either: a server started before this directory was renamed, or from
 # another checkout, answers /health here indistinguishably from ours and has to be
-# reachable to be retired. That includes a server from before the rename to
-# blueline, still running out of a mdpreview-server directory on the same port.
+# reachable to be retired.
 server_pids() {
   for pid in $(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null); do
-    if ps -o command= -p "$pid" 2>/dev/null | grep -qE '(blueline-server|mdpreview(-server)?)/server\.ts'; then
+    if ps -o command= -p "$pid" 2>/dev/null | grep -qE 'blueline-server/server\.ts'; then
       printf '%s\n' "$pid"
     fi
   done

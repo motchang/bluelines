@@ -34,10 +34,10 @@ command on PATH:
 	cd ~/src/github.com/motchang/bluelines/blueline-server && bun install
 	ln -sf ~/src/github.com/motchang/bluelines/bin/blueline ~/bin/blueline
 
-Coming from mdpreview in motchang/dotfiles: remove its link with
-`rm -f ~/bin/mdpreview`. A render server mdpreview left running on the same port
-is recognised and replaced the first time blueline runs. `MDPREVIEW_PORT` is no
-longer read - set `BLUELINE_PORT` instead if you had changed the port.
+Coming from mdpreview in motchang/dotfiles: run `mdpreview --stop` first, then
+`rm -f ~/bin/mdpreview`. blueline does not recognise a render server mdpreview
+started, so one left on the same port would keep serving with the old code.
+`MDPREVIEW_PORT` is no longer read - set `BLUELINE_PORT` if you had changed it.
 
 ## Usage
 
