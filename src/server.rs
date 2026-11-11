@@ -297,65 +297,12 @@ impl Shared {
             return;
         };
 
-        let dirs: HashSet<PathBuf> = [file.clone(), real_path(&file)]
-            .iter()
-            .filter_map(|path| path.parent().map(real_path))
-            .collect();
-
-        let (events, mut incoming) = mpsc::unbounded_channel::<()>();
-        let mut watchers = Vec::new();
-        for dir in &dirs {
-            let events = events.clone();
-            let watcher =
-                notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                    let Ok(event) = result else {
-                        return;
-                    };
-                    // Reading the file to render it is itself an access event.
-                    if matches!(event.kind, EventKind::Access(_)) {
-                        return;
-                    }
-                    let _ = events.send(());
-                });
-            let Ok(mut watcher) = watcher else {
-                continue;
-            };
-            if watcher.watch(dir, RecursiveMode::NonRecursive).is_ok() {
-                watchers.push(watcher);
-            }
-        }
+        let (events, incoming) = mpsc::unbounded_channel::<()>();
+        let watchers = watch_directories(&file, &events);
         if watchers.is_empty() {
             return;
         }
-
-        let shared = self.clone();
-        let key = key.clone();
-        let task = tokio::spawn(async move {
-            // The path as opened, not the resolved one: metadata follows the
-            // link, so one fingerprint covers an edit to the real file and a
-            // link repointed somewhere else.
-            let mut watched = fingerprint(&file);
-            let mut deadline: Option<Instant> = None;
-            loop {
-                tokio::select! {
-                    event = incoming.recv() => {
-                        if event.is_none() {
-                            return;
-                        }
-                        let state = fingerprint(&file);
-                        if state == watched {
-                            continue;
-                        }
-                        watched = state;
-                        deadline = Some(Instant::now() + RELOAD_DEBOUNCE);
-                    }
-                    () = sleep_until(deadline), if deadline.is_some() => {
-                        deadline = None;
-                        shared.broadcast_reload(&key);
-                    }
-                }
-            }
-        });
+        let task = tokio::spawn(reload_on_change(self.clone(), key.clone(), file, incoming));
         channel.watch = Some(Watch {
             _watchers: watchers,
             task,
@@ -437,6 +384,67 @@ impl Shared {
     }
 }
 
+/// Watches the directory holding `file`, and its real directory when it is a
+/// symlink, sending a signal on every event but an access. Directories that
+/// cannot be watched are skipped.
+fn watch_directories(
+    file: &Path,
+    events: &mpsc::UnboundedSender<()>,
+) -> Vec<notify::RecommendedWatcher> {
+    let dirs: HashSet<PathBuf> = [file.to_path_buf(), real_path(file)]
+        .iter()
+        .filter_map(|path| path.parent().map(real_path))
+        .collect();
+    dirs.iter()
+        .filter_map(|dir| {
+            let events = events.clone();
+            let mut watcher =
+                notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                    // Reading the file to render it is itself an access event.
+                    if result.is_ok_and(|event| !matches!(event.kind, EventKind::Access(_))) {
+                        let _ = events.send(());
+                    }
+                })
+                .ok()?;
+            watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+            Some(watcher)
+        })
+        .collect()
+}
+
+/// Reloads `key`'s pages, debounced, whenever a directory event finds the
+/// file's fingerprint changed.
+async fn reload_on_change(
+    shared: Shared,
+    key: Key,
+    file: PathBuf,
+    mut incoming: mpsc::UnboundedReceiver<()>,
+) {
+    // The path as opened, not the resolved one: metadata follows the link, so
+    // one fingerprint covers an edit to the real file and a link repointed
+    // somewhere else.
+    let mut watched = fingerprint(&file);
+    let mut deadline: Option<Instant> = None;
+    loop {
+        tokio::select! {
+            event = incoming.recv() => {
+                if event.is_none() {
+                    return;
+                }
+                let state = fingerprint(&file);
+                if state != watched {
+                    watched = state;
+                    deadline = Some(Instant::now() + RELOAD_DEBOUNCE);
+                }
+            }
+            () = sleep_until(deadline), if deadline.is_some() => {
+                deadline = None;
+                shared.broadcast_reload(&key);
+            }
+        }
+    }
+}
+
 async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -512,63 +520,64 @@ impl Query {
 }
 
 async fn handle(State(state): State<Shared>, request: Request) -> Response {
-    let port = state.lock().port;
-    // A DNS rebinding attack resolves the attacker's hostname to 127.0.0.1, and
-    // the Host header is what gives it away.
+    if !host_allowed(&request, state.lock().port) {
+        return text(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let query = Query::parse(&request);
+    match request.uri().path() {
+        "/open" | "/shutdown" | "/viewers" => tooling(&state, request, &query).await,
+        "/health" => health(&state),
+        "/events" => events(&state, &query),
+        "/image" => image(&state, &query).await,
+        "/" => page(&state, &query).await,
+        path => asset(path),
+    }
+}
+
+/// Whether the Host header names this server. A DNS rebinding attack resolves
+/// the attacker's hostname to 127.0.0.1, and the Host header gives it away.
+fn host_allowed(request: &Request, port: u16) -> bool {
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
+    [format!("127.0.0.1:{port}"), format!("localhost:{port}")].contains(&host.to_owned())
+}
+
+/// The routes only local tooling uses. A page in a browser attaches an Origin
+/// to every cross-origin POST, so its presence means the request came from
+/// somewhere else.
+async fn tooling(state: &Shared, request: Request, query: &Query) -> Response {
+    if request.headers().contains_key(header::ORIGIN) {
         return text(StatusCode::FORBIDDEN, "forbidden");
     }
-
     let path = request.uri().path().to_owned();
-    let query = Query::parse(&request);
-    let method = request.method().clone();
-    // Only local tooling uses /open, /shutdown and /viewers. A page in a browser
-    // attaches an Origin to every cross-origin POST, so its presence means the
-    // request came from somewhere else.
-    let from_page = request.headers().contains_key(header::ORIGIN);
-
-    match (path.as_str(), method) {
-        ("/health", _) => health(&state),
-        ("/open", Method::POST) => {
-            if from_page {
-                return text(StatusCode::FORBIDDEN, "forbidden");
-            }
-            open(&state, request).await
-        }
-        ("/shutdown", Method::POST) => {
-            if from_page {
-                return text(StatusCode::FORBIDDEN, "forbidden");
-            }
-            shutdown()
-        }
-        ("/viewers", _) => {
-            if from_page {
-                return text(StatusCode::FORBIDDEN, "forbidden");
-            }
-            // An unregistered path has no viewers. Answering 0 rather than 404
-            // keeps this from telling anyone which paths are registered.
-            let count = state
-                .target_for(&query)
-                .map_or(0, |(key, _)| state.tabs_showing(&key));
-            json_response(StatusCode::OK, json!({ "ok": true, "count": count }))
-        }
-        ("/events", _) => events(&state, &query),
-        ("/image", _) => image(&state, &query).await,
-        ("/", _) => page(&state, &query).await,
-        (path, _) if path.starts_with("/assets/") => match assets::get(path) {
-            Some(asset) => (
-                [(header::CONTENT_TYPE, asset.content_type)],
-                Bytes::from_static(asset.bytes),
-            )
-                .into_response(),
-            None => text(StatusCode::NOT_FOUND, "not found"),
-        },
+    match (path.as_str(), request.method()) {
+        ("/open", &Method::POST) => open(state, request).await,
+        ("/shutdown", &Method::POST) => shutdown(),
+        ("/viewers", _) => viewers(state, query),
         _ => text(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+/// Browser tabs showing a path. An unregistered path has no viewers; answering
+/// 0 rather than 404 keeps this from telling anyone which paths are registered.
+fn viewers(state: &Shared, query: &Query) -> Response {
+    let count = state
+        .target_for(query)
+        .map_or(0, |(key, _)| state.tabs_showing(&key));
+    json_response(StatusCode::OK, json!({ "ok": true, "count": count }))
+}
+
+fn asset(path: &str) -> Response {
+    match assets::get(path) {
+        Some(asset) => (
+            [(header::CONTENT_TYPE, asset.content_type)],
+            Bytes::from_static(asset.bytes),
+        )
+            .into_response(),
+        None => text(StatusCode::NOT_FOUND, "not found"),
     }
 }
 
