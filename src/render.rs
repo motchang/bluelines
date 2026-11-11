@@ -9,10 +9,6 @@
 //! the table of contents is left to the server too, built from the headings
 //! returned alongside the body.
 
-// The server is the only caller and is ported separately (#11); until it calls
-// in, the tests are the only users.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::path::Path;
 
 use comrak::nodes::{AlertType, AstNode, NodeHtmlBlock, NodeValue};
