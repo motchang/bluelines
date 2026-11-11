@@ -164,6 +164,17 @@ does not preview anything yet.
 	cargo clippy --all-targets -- -D warnings
 	cargo test
 
+Coverage is measured with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)
+(`cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`):
+
+	cargo llvm-cov --open
+
+CI writes `coverage/lcov.info` and an HTML report (uploaded as the `coverage`
+artifact), and [octocov](https://github.com/k1LoW/octocov) (configured in
+`.octocov.yml`) comments the coverage on each pull request. The report for
+`main` is kept as an Actions artifact, so pull requests show the diff against
+`main`.
+
 CI also measures the cognitive and cyclomatic complexity of every function in
 `src/` with [cccc](https://github.com/moznion/cccc)
 (`.github/workflows/complexity.yml`). It fails when a function goes over a

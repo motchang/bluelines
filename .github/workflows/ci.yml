@@ -47,3 +47,42 @@ jobs:
           rustup default "$msrv"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # octocov comments the coverage report on pull requests.
+      pull-requests: write
+      # octocov reads and writes earlier reports stored as artifacts.
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --all-targets --locked --lcov --output-path coverage/lcov.info
+          cargo llvm-cov report --html --output-dir coverage
+      - name: Upload coverage artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+      - name: Run octocov
+        # Pull requests from forks get a read-only token and cannot comment.
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+        uses: k1LoW/octocov-action@v1
+        with:
+          config: .octocov.yml

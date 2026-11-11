@@ -1,0 +1,19 @@
+# octocov configuration, read by the coverage job in .github/workflows/ci.yml.
+# It comments coverage on pull requests, stores the main branch report as a
+# GitHub Actions artifact, and shows the diff against main. No external
+# service or token is needed beyond the workflow's GITHUB_TOKEN.
+repository: ${GITHUB_REPOSITORY}
+coverage:
+  paths:
+    - coverage/lcov.info
+comment:
+  if: is_pull_request
+summary:
+  if: true
+report:
+  if: is_default_branch
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
