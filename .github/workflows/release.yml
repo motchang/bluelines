@@ -164,6 +164,12 @@ jobs:
       - name: Render the formula
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          # Pre-releases never go to the tap (the steps below skip them too),
+          # and the script refuses them.
+          if [[ "$version" == *-* ]]; then
+            echo "Pre-release $version: no Homebrew formula"
+            exit 0
+          fi
           cat dist/*.tar.gz.sha256 > dist/SHA256SUMS
           packaging/homebrew/formula.sh "$version" dist/SHA256SUMS > blueline.rb
           ruby -c blueline.rb
