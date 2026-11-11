@@ -271,8 +271,15 @@ impl Shared {
     /// The containing directory is watched rather than the file, because
     /// editors that save by renaming a temporary file over the original break a
     /// watch on the file itself. A symlinked file has its real directory watched
-    /// as well, since writes land there. An event for one of those names, or
-    /// any event after which the file's stat fingerprint changed, reloads.
+    /// as well, since writes land there. Any event in those directories after
+    /// which the file's stat fingerprint has changed reloads.
+    ///
+    /// The fingerprint is the whole test, and the event's file name plays no
+    /// part. macOS reports only the source name of a rename, so the name cannot
+    /// be relied on to show up, and FSEvents can deliver an event for a write
+    /// made just before the watch started, which would reload a page for a
+    /// change it already shows. A save always changes the fingerprint: the
+    /// inode on a save by rename, the size or the nanosecond mtime otherwise.
     ///
     /// A directory that cannot be watched is skipped. If none can, the channel
     /// is left connected and silent until `/open` registers the path again.
@@ -290,23 +297,14 @@ impl Shared {
             return;
         };
 
-        let mut dirs: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
-        for path in [file.clone(), real_path(&file)] {
-            let Some(parent) = path.parent() else {
-                continue;
-            };
-            let dir = real_path(parent);
-            let mut known = dir.clone();
-            if let Some(name) = path.file_name() {
-                known.push(name);
-            }
-            dirs.entry(dir).or_default().insert(known);
-        }
-        let known: HashSet<PathBuf> = dirs.values().flatten().cloned().collect();
+        let dirs: HashSet<PathBuf> = [file.clone(), real_path(&file)]
+            .iter()
+            .filter_map(|path| path.parent().map(real_path))
+            .collect();
 
-        let (events, mut incoming) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+        let (events, mut incoming) = mpsc::unbounded_channel::<()>();
         let mut watchers = Vec::new();
-        for dir in dirs.keys() {
+        for dir in &dirs {
             let events = events.clone();
             let watcher =
                 notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -317,7 +315,7 @@ impl Shared {
                     if matches!(event.kind, EventKind::Access(_)) {
                         return;
                     }
-                    let _ = events.send(event.paths);
+                    let _ = events.send(());
                 });
             let Ok(mut watcher) = watcher else {
                 continue;
@@ -340,11 +338,12 @@ impl Shared {
             let mut deadline: Option<Instant> = None;
             loop {
                 tokio::select! {
-                    paths = incoming.recv() => {
-                        let Some(paths) = paths else { return };
+                    event = incoming.recv() => {
+                        if event.is_none() {
+                            return;
+                        }
                         let state = fingerprint(&file);
-                        let named = paths.iter().any(|path| known.contains(path));
-                        if !named && state == watched {
+                        if state == watched {
                             continue;
                         }
                         watched = state;
