@@ -186,6 +186,24 @@ or set `BLUELINE_PORT` to another port. The CLI and the server find the token
 through the same environment variables, so a server started from a shell with
 another `XDG_RUNTIME_DIR` or `TMPDIR` cannot be told apart from an impostor.
 
+## Claude Code skill
+
+This repository is also a [Claude Code](https://code.claude.com) plugin
+marketplace. Its `blueline` plugin carries a skill that teaches an agent when
+and how to preview markdown with blueline, and how to check the rendered page
+with `blueline --` inside herdr. In Claude Code:
+
+	/plugin install blueline --marketplace motchang/bluelines
+
+or, from a shell:
+
+	claude plugin marketplace add motchang/bluelines
+	claude plugin install blueline@bluelines
+
+The plugin only holds the skill; install the `blueline` command itself as
+described under [Install](#install). The plugin's version follows the
+command's, so update both together.
+
 ## Development
 
 The crate lives at the root of this repository - package `bluelines`, command
@@ -220,8 +238,10 @@ locally, install cccc (`cargo install cccc-cli`) and run
 
 Releases are built by `.github/workflows/release.yml`. To cut one:
 
-1. Bump `version` in `Cargo.toml`, run `cargo check` so that `Cargo.lock`
-   follows, and merge that change to `main`.
+1. Bump `version` in `Cargo.toml` and in
+   `plugins/blueline/.claude-plugin/plugin.json`, run `cargo check` so that
+   `Cargo.lock` follows, and merge that change to `main`. CI fails while the
+   two versions differ.
 2. Tag the merge commit with the same version and push the tag:
 
 		git tag v0.1.0
