@@ -667,6 +667,12 @@ fn every_page_gets_its_own_nonce() {
 }
 
 #[test]
+fn mermaid_runs_in_strict_mode() {
+    let server = Server::start();
+    assert!(server.get("/").body.contains("securityLevel: \"strict\""));
+}
+
+#[test]
 fn assets_are_embedded() {
     let server = Server::start();
     for (path, content_type) in [

@@ -6,7 +6,9 @@ blueline puts the preview in a
 inside your herdr tab, and an agent can drive that page with
 `blueline -- <command>`: snapshot it, read its console, click through it.
 Everything renders offline - mermaid.js and highlight.js ship inside the
-binary, so nothing goes out to the network.
+binary, so blueline itself fetches nothing from the network. A document's own
+remote images (README badges, say) are still loaded by the browser, as they
+would be on GitHub.
 
 Without `--term`, a file opens in an ordinary desktop browser tab. Embedded
 mermaid renders too, and saving the file reloads the page.
@@ -172,16 +174,17 @@ uses `terminal-browser shutdown`, which closes every terminal-browser in the
 session.
 
 The render server is the same binary, started in the background as
-`blueline serve`, and logs to `${TMPDIR}/blueline-server.log`. A `blueline` from
-another install or version holding the port is asked to stop and replaced, so
-the page always renders with the code of the command that asked for it. One that
-cannot answer the challenge is asked to stop without being sent the token, and
-if it does not, blueline says so and leaves it running: no process is ever
-signalled. Something on the port that does not say it is blueline is left alone
-too, and blueline refuses to preview through it; stop it, or set
-`BLUELINE_PORT` to another port. The CLI and the server find the token through
-the same environment variables, so a server started from a shell with another
-`XDG_RUNTIME_DIR` or `TMPDIR` cannot be told apart from an impostor.
+`blueline serve`, and logs to `server.log` in `$XDG_STATE_HOME/blueline`
+(`~/.local/state/blueline` when that is unset), a directory only you can read.
+A `blueline` from another install or version holding the port is asked to stop
+and replaced, so the page always renders with the code of the command that asked
+for it. One that cannot answer the challenge is asked to stop without being sent
+the token, and if it does not, blueline says so and leaves it running: no
+process is ever signalled. Something on the port that does not say it is
+blueline is left alone too, and blueline refuses to preview through it; stop it,
+or set `BLUELINE_PORT` to another port. The CLI and the server find the token
+through the same environment variables, so a server started from a shell with
+another `XDG_RUNTIME_DIR` or `TMPDIR` cannot be told apart from an impostor.
 
 ## Development
 
