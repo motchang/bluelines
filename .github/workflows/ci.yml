@@ -35,6 +35,23 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked
 
+  plugin:
+    name: Claude Code plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the plugin version matches Cargo.toml
+        run: |
+          jq empty .claude-plugin/marketplace.json
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          plugin=$(jq -r .version plugins/blueline/.claude-plugin/plugin.json)
+          if [ "$crate" != "$plugin" ]; then
+            echo "::error file=plugins/blueline/.claude-plugin/plugin.json::plugin version $plugin does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
