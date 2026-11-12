@@ -15,3 +15,15 @@ updates:
     groups:
       dependencies:
         patterns: ["*"]
+  # The browser assets embedded in the binary. A bump here only changes the
+  # lockfile; the "Vendored assets" check then fails until
+  # packaging/vendor/update.sh is run on the branch and the result committed.
+  - package-ecosystem: "npm"
+    directory: "/packaging/vendor"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      vendored-assets:
+        patterns: ["*"]

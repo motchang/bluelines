@@ -1,0 +1,35 @@
+# Fails when assets/vendor does not match the npm packages pinned in
+# packaging/vendor/package-lock.json, e.g. when Dependabot bumps a version
+# there. Running packaging/vendor/update.sh and committing the result fixes it.
+name: Vendored assets
+
+on:
+  pull_request:
+    paths:
+      - assets/vendor/**
+      - packaging/vendor/**
+      - .github/workflows/vendored-assets.yml
+  push:
+    branches: [main]
+    paths:
+      - assets/vendor/**
+      - packaging/vendor/**
+      - .github/workflows/vendored-assets.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendored-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check vendored assets match the lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: packaging/vendor/update.sh --check

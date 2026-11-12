@@ -1042,7 +1042,12 @@ impl Shell<'_> {
 <script nonce="{nonce}">
   hljs.highlightAll();
   const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  mermaid.initialize({{ startOnLoad: false, theme: dark ? "dark" : "default" }});
+  mermaid.initialize({{
+    startOnLoad: false,
+    theme: dark ? "dark" : "default",
+    // The default today, set explicitly so that an update cannot loosen it.
+    securityLevel: "strict",
+  }});
   mermaid.run({{ querySelector: "pre.mermaid" }});
   new EventSource({events}).onmessage = () => location.reload();
 </script>
