@@ -4,8 +4,8 @@
   "description": "Pins the npm packages copied into assets/vendor. Run update.sh after changing a version.",
   "license": "MIT OR Apache-2.0",
   "dependencies": {
-    "@highlightjs/cdn-assets": "11.11.1",
+    "@highlightjs/cdn-assets": "11.12.0",
     "github-markdown-css": "5.9.0",
-    "mermaid": "11.16.0"
+    "mermaid": "12.3.0"
   }
 }
