@@ -6,7 +6,9 @@ blueline puts the preview in a
 inside your herdr tab, and an agent can drive that page with
 `blueline -- <command>`: snapshot it, read its console, click through it.
 Everything renders offline - mermaid.js and highlight.js ship inside the
-binary, so nothing goes out to the network.
+binary, so blueline itself fetches nothing from the network. A document's own
+remote images (README badges, say) are still loaded by the browser, as they
+would be on GitHub.
 
 Without `--term`, a file opens in an ordinary desktop browser tab. Embedded
 mermaid renders too, and saving the file reloads the page.
@@ -153,8 +155,9 @@ uses `terminal-browser shutdown`, which closes every terminal-browser in the
 session.
 
 The render server is the same binary, started in the background as
-`blueline serve`, and logs to `${TMPDIR}/blueline-server.log`. A `blueline` from
-another install or version holding the port is stopped and replaced, so the
+`blueline serve`, and logs to `server.log` in `$XDG_STATE_HOME/blueline`
+(`~/.local/state/blueline` when that is unset), a directory only you can read.
+A `blueline` from another install or version holding the port is stopped and replaced, so the
 page always renders with the code of the command that asked for it.
 
 ## Development

@@ -7,7 +7,9 @@
 //! That replaces the `lsof` / `ps` / `curl` / `jq` pipeline of the sh version,
 //! and with it the dependency on all four being installed.
 
-use std::fs::OpenOptions;
+use std::fs::{DirBuilder, File, OpenOptions, Permissions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,12 +188,18 @@ impl Server {
         }
     }
 
-    /// The log a server started from here writes to.
+    /// The log a server started from here writes to: `server.log` in a
+    /// directory only this user can use. That is `$XDG_STATE_HOME/blueline`,
+    /// else `~/.local/state/blueline`, and only without a home directory
+    /// `blueline-<uid>` in `$TMPDIR` or `/tmp`.
     pub fn log_path() -> PathBuf {
-        let dir = std::env::var_os("TMPDIR")
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| "/tmp".into());
-        PathBuf::from(dir).join("blueline-server.log")
+        log_dir(
+            std::env::var_os("XDG_STATE_HOME"),
+            std::env::var_os("HOME"),
+            std::env::var_os("TMPDIR"),
+            current_uid(),
+        )
+        .join("server.log")
     }
 
     /// Makes sure the server on the port is this binary, starting it when the
@@ -232,10 +240,7 @@ impl Server {
             ))
         };
         let exe = std::env::current_exe().map_err(|_| not_started())?;
-        let output = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
+        let output = open_log(&log)
             .map_err(|e| Failure::new(format!("cannot open {}: {e}", log.display())))?;
         let errors = output.try_clone().map_err(|_| not_started())?;
         // Its own process group, so that a Ctrl-C in the terminal that started
@@ -406,9 +411,144 @@ pub fn uri_encode(s: &str) -> String {
     out
 }
 
+/// The directory [`Server::log_path`] puts the log in. Relative values are
+/// ignored, as the XDG base directory spec asks.
+fn log_dir(
+    state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    tmpdir: Option<std::ffi::OsString>,
+    uid: u32,
+) -> PathBuf {
+    let absolute = |value: Option<std::ffi::OsString>| {
+        value.map(PathBuf::from).filter(|path| path.is_absolute())
+    };
+    if let Some(state) = absolute(state_home) {
+        return state.join("blueline");
+    }
+    if let Some(home) = absolute(home) {
+        return home.join(".local/state/blueline");
+    }
+    absolute(tmpdir)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(format!("blueline-{uid}"))
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
+    unsafe { libc::geteuid() }
+}
+
+/// Opens the server log for appending, refusing anything another user could
+/// have planted. Its directory is created private (0700) or must already be a
+/// real directory of ours, which is then made private; the log itself is
+/// created 0600, never opened through a symlink, and must be a regular file of
+/// ours. A shared `/tmp` is the case this is for: there, someone else could
+/// otherwise pre-create the log to read it, or point it somewhere with a link.
+fn open_log(path: &Path) -> io::Result<File> {
+    let uid = current_uid();
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("the log path has no directory"))?;
+    private_dir(dir, uid)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.uid() != uid {
+        return Err(io::Error::other("not a regular file of this user's"));
+    }
+    Ok(file)
+}
+
+/// Makes sure `dir` is a real directory that `uid` owns and only it can use,
+/// creating it 0700 if it is missing and tightening it if it is ours.
+fn private_dir(dir: &Path, uid: u32) -> io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(error) = DirBuilder::new().mode(0o700).create(dir) {
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() || meta.uid() != uid {
+        return Err(io::Error::other(format!(
+            "{} is not a directory of this user's",
+            dir.display()
+        )));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_dir_prefers_per_user_locations() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            log_dir(os("/state"), os("/home/me"), os("/tmp/x"), 7),
+            PathBuf::from("/state/blueline")
+        );
+        assert_eq!(
+            log_dir(os("rel"), os("/home/me"), None, 7),
+            PathBuf::from("/home/me/.local/state/blueline")
+        );
+        assert_eq!(
+            log_dir(None, None, os("/var/tmp"), 7),
+            PathBuf::from("/var/tmp/blueline-7")
+        );
+        assert_eq!(
+            log_dir(None, os(""), None, 7),
+            PathBuf::from("/tmp/blueline-7")
+        );
+    }
+
+    #[test]
+    fn open_log_creates_private_dir_and_file() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("a/blueline/server.log");
+        drop(open_log(&log).unwrap());
+        let dir_mode = std::fs::metadata(log.parent().unwrap()).unwrap().mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
+        // Reopening appends to the same file.
+        drop(open_log(&log).unwrap());
+    }
+
+    #[test]
+    fn open_log_tightens_an_existing_dir_of_ours() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("blueline");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o777)).unwrap();
+        drop(open_log(&dir.join("server.log")).unwrap());
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn open_log_refuses_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let dir = root.path().join("blueline");
+        std::fs::create_dir(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("server.log")).unwrap();
+        assert!(open_log(&dir.join("server.log")).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+        let linked = root.path().join("linked");
+        std::os::unix::fs::symlink(&dir, &linked).unwrap();
+        assert!(open_log(&linked.join("server.log")).is_err());
+    }
 
     #[test]
     fn uri_encoding_matches_jq() {

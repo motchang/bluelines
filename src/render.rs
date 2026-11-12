@@ -64,8 +64,9 @@ pub struct Rendered {
 /// document order. Returning `Some(url)` replaces the URL; `None` leaves it as
 /// the document wrote it.
 ///
-/// Raw HTML in the document is passed through, as it always has been: the page
-/// is served under a nonce-only script policy, which is what makes it inert.
+/// Raw HTML in the document is passed through, with the tags in
+/// [`FILTERED_TAGS`] neutralised: the page is served under a nonce-only script
+/// policy, which is what keeps the rest inert.
 pub fn render(
     source: &str,
     rewrite: &mut dyn FnMut(Reference, &str) -> Option<String>,
@@ -80,7 +81,9 @@ pub fn render(
 
     // Links first, so that a link inside a heading is already rewritten when
     // the heading is rendered on its own below.
+    // Raw HTML is filtered before then too, for the same reason.
     for node in &nodes {
+        filter_raw_html(node);
         let mut ast = node.data_mut();
         let (kind, link) = match ast.value {
             NodeValue::Link(ref mut link) => (Reference::Link, link),
@@ -160,6 +163,68 @@ pub fn escape_html(value: &str) -> String {
         }
     }
     out
+}
+
+/// Tags that raw HTML in a document may not open. GFM's disallowed raw HTML
+/// list, plus the document-level tags that would let a document act on the
+/// page around it: `<meta http-equiv="refresh">` navigates the preview away,
+/// `<base>` redirects its relative URLs, and `<link>` pulls in remote
+/// stylesheets or prefetches.
+const FILTERED_TAGS: [&str; 12] = [
+    "title",
+    "textarea",
+    "style",
+    "xmp",
+    "iframe",
+    "noembed",
+    "noframes",
+    "script",
+    "plaintext",
+    "meta",
+    "base",
+    "link",
+];
+
+/// Applies [`filter_tags`] to a raw HTML node; other nodes are left alone.
+fn filter_raw_html<'a>(node: &'a AstNode<'a>) {
+    match node.data_mut().value {
+        NodeValue::HtmlBlock(ref mut block) => block.literal = filter_tags(&block.literal),
+        NodeValue::HtmlInline(ref mut literal) => *literal = filter_tags(literal),
+        _ => {}
+    }
+}
+
+/// Neutralises every opening or closing tag in [`FILTERED_TAGS`] by escaping
+/// its `<`, the way GFM's tagfilter extension does, so the tag shows as text.
+fn filter_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let name = after.strip_prefix('/').unwrap_or(after);
+        if starts_filtered_tag(name) {
+            out.push_str("&lt;");
+        } else {
+            out.push('<');
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `name` begins with a filtered tag name, ended the way HTML ends a
+/// tag name: by whitespace, `/`, `>` or the end of the input.
+fn starts_filtered_tag(name: &str) -> bool {
+    FILTERED_TAGS.iter().any(|tag| {
+        name.get(..tag.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(tag))
+            && name[tag.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_ascii_whitespace() || c == '/' || c == '>')
+    })
 }
 
 /// GitHub Flavored Markdown, with raw HTML passed through.
@@ -323,6 +388,35 @@ mod tests {
             actual, expected,
             "rendering changed; rerun with UPDATE_SNAPSHOTS=1 if intended"
         );
+    }
+
+    #[test]
+    fn filtered_tags_are_escaped() {
+        let html = render_plain(
+            "<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\">\n\n\
+             <BASE href=\"https://evil.example/\"/>\n\n\
+             a <link rel=stylesheet href=https://evil.example/x.css> b\n\n\
+             <script>x</script>\n\n\
+             <style>p{}</style>\n",
+        )
+        .html;
+        for tag in [
+            "<meta", "<BASE", "<link", "<script", "</script", "<style", "</style",
+        ] {
+            assert!(!html.contains(tag), "{tag} survived in {html}");
+        }
+        assert!(html.contains("&lt;meta http-equiv"));
+        assert!(html.contains("&lt;BASE href"));
+        assert!(html.contains("a &lt;link rel"));
+        assert!(html.contains("&lt;/script>"));
+    }
+
+    #[test]
+    fn other_raw_html_passes_through() {
+        let html = render_plain("<details><summary>s</summary>\n\n<metadata>x</metadata> <linked> <br/>\n\n</details>\n").html;
+        for tag in ["<details>", "<summary>", "<metadata>", "<linked>", "<br/>"] {
+            assert!(html.contains(tag), "{tag} missing in {html}");
+        }
     }
 
     #[test]
