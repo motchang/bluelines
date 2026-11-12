@@ -1,6 +1,6 @@
 {
   "name": "blueline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Preview markdown and mermaid with blueline, and inspect the rendered page from an agent",
   "author": {
     "name": "motchang",
