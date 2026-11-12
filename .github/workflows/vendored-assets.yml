@@ -1,6 +1,7 @@
 # Fails when assets/vendor does not match the npm packages pinned in
-# packaging/vendor/package-lock.json, e.g. when Dependabot bumps a version
-# there. Running packaging/vendor/update.sh and committing the result fixes it.
+# packaging/vendor/package-lock.json. Running packaging/vendor/update.sh and
+# committing the result fixes it; on Dependabot's pull requests the "Sync
+# vendored assets" workflow does that itself.
 name: Vendored assets
 
 on:
@@ -9,6 +10,8 @@ on:
       - assets/vendor/**
       - packaging/vendor/**
       - .github/workflows/vendored-assets.yml
+  # Dispatched by the "Sync vendored assets" workflow after it pushes.
+  workflow_dispatch:
   push:
     branches: [main]
     paths:

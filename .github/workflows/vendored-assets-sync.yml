@@ -1,0 +1,60 @@
+# Regenerates assets/vendor on Dependabot's pull requests for
+# packaging/vendor, which only bump package.json and package-lock.json, and
+# commits the result to the pull request branch.
+#
+# A push made with GITHUB_TOKEN does not start new workflow runs, so the job
+# then dispatches the checks on the branch itself; their results land on the
+# new head commit and show on the pull request.
+name: Sync vendored assets
+
+on:
+  pull_request:
+    paths:
+      - packaging/vendor/package.json
+      - packaging/vendor/package-lock.json
+
+permissions: {}
+
+concurrency:
+  group: vendored-assets-sync-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    name: Regenerate vendored assets
+    # Only Dependabot's own branches in this repository; anyone else runs
+    # packaging/vendor/update.sh themselves.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # Push the regenerated files to the pull request branch.
+      contents: write
+      # Dispatch the checks on the new head commit.
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - run: packaging/vendor/update.sh
+
+      - name: Commit and run the checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ -z "$(git status --porcelain -- assets/vendor)" ]; then
+            echo "assets/vendor is already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/vendor
+          git commit -m "Regenerate vendored assets"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          for workflow in ci.yml complexity.yml vendored-assets.yml; do
+            gh workflow run "$workflow" --ref "$BRANCH"
+          done
