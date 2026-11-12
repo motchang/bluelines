@@ -131,6 +131,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "getrandom",
+ "libc",
  "notify",
  "percent-encoding",
  "serde",

@@ -850,6 +850,10 @@ fn content_security_policy(nonce: &str) -> String {
         "connect-src 'self'".to_owned(),
         "object-src 'none'".to_owned(),
         "base-uri 'none'".to_owned(),
+        // Nothing on the page posts a form, so a document cannot either.
+        "form-action 'none'".to_owned(),
+        // The preview is a top-level page; no other site may frame it.
+        "frame-ancestors 'none'".to_owned(),
     ]
     .join("; ")
 }
@@ -1098,6 +1102,15 @@ const STYLE: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csp_blocks_forms_and_framing() {
+        let csp = content_security_policy("n0nce");
+        assert!(csp.contains("script-src 'nonce-n0nce'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+    }
 
     #[test]
     fn resolve_is_lexical() {

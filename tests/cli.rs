@@ -160,6 +160,7 @@ impl Env {
             )
             .env("BLUELINE_PORT", self.port.to_string())
             .env("TMPDIR", self.dir.path())
+            .env("XDG_STATE_HOME", self.dir.path())
             .env("FAKE_DIR", self.dir.path())
             .env_remove("HERDR_TAB_ID")
             .env_remove("HERDR_PANE_ID");
