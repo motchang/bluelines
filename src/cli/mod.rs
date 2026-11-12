@@ -235,12 +235,12 @@ impl Session {
     ///
     /// The file is read before ownership of the port is settled, on purpose:
     /// the server answering may be another blueline, and its current file is
-    /// still the file on screen, which is the thing being restored.
+    /// still the file on screen, which is the thing being restored. Only a
+    /// server that proves it knows this user's token is asked: the paths are
+    /// the user's, and anything else could be making them up.
     fn resume(&self, which: Resume) -> Result<PathBuf, Failure> {
-        let health = self
-            .server
-            .health(std::time::Duration::from_secs(2))
-            .unwrap_or_default();
+        self.server.holder();
+        let health = self.server.files();
         let recent = health.recent_or_current().map(str::to_owned);
         let file = match which {
             Resume::Recent => recent.clone(),
@@ -299,7 +299,7 @@ impl Session {
     /// taken before registering, because a page in the middle of that reload
     /// has dropped its event stream and would not be counted.
     fn preview_in_browser(&self, file: &Path) -> Result<ExitCode, Failure> {
-        let url = self.server.preview_url(file, "tab");
+        let url = self.server.preview_url(file, "tab")?;
         let Some(opener) = Self::find_opener() else {
             return Err(Failure::new(format!(
                 "no way to open a browser - neither open nor xdg-open is on PATH; the preview is at {url}"

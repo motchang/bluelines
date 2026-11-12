@@ -123,6 +123,25 @@ in this tab even while a browser tab is open on one, and points at `--term`.
 file sitting on disk that blueline was never pointed at comes back 404, and so
 does anything else - the query is not a way to ask this server to read a file.
 
+The loopback port is open to every user and process on the machine, so the
+server trusts none of them for being local. When it starts it writes a random
+token to `blueline-<uid>/server-<port>.token` under `$XDG_RUNTIME_DIR`, or
+`$TMPDIR` or `/tmp` without one, in a directory and file only you can read.
+Registering a file, stopping the server and asking for a page ticket all need
+that token. Pages, their images and their reload streams need a view key
+instead, which a browser gets by visiting a preview URL with a single-use ticket
+in it: the server swaps the ticket for the key in the address, and the page's
+own links, images and reload stream carry it from there. It is not a cookie,
+because a browser sends cookies for 127.0.0.1 to every port on it, and pages are
+served with `Referrer-Policy: no-referrer` so that following a link does not
+pass the key on either. A browser tab blueline did not open, or one left over
+from an earlier server, is refused until `blueline <file.md>` opens it again. A
+bare `/` is a page like any other and needs the key too.
+
+Before blueline sends anything to the server on the port, the server has to
+answer a fresh challenge with an HMAC keyed by the token. A process that took
+the port first cannot, so it is never sent a path, the token or anything else.
+
 Left to itself, `terminal-browser action` drives the active tab of this tab's
 browser, which is not the preview once the preview shares a browser with other
 pages. Naming the preview is blueline's job: `blueline -- <command>` finds this
@@ -157,8 +176,15 @@ session.
 The render server is the same binary, started in the background as
 `blueline serve`, and logs to `server.log` in `$XDG_STATE_HOME/blueline`
 (`~/.local/state/blueline` when that is unset), a directory only you can read.
-A `blueline` from another install or version holding the port is stopped and replaced, so the
-page always renders with the code of the command that asked for it.
+A `blueline` from another install or version holding the port is asked to stop
+and replaced, so the page always renders with the code of the command that asked
+for it. One that cannot answer the challenge is asked to stop without being sent
+the token, and if it does not, blueline says so and leaves it running: no
+process is ever signalled. Something on the port that does not say it is
+blueline is left alone too, and blueline refuses to preview through it; stop it,
+or set `BLUELINE_PORT` to another port. The CLI and the server find the token
+through the same environment variables, so a server started from a shell with
+another `XDG_RUNTIME_DIR` or `TMPDIR` cannot be told apart from an impostor.
 
 ## Development
 

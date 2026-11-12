@@ -5,6 +5,7 @@
 //! starts by re-executing itself.
 
 mod assets;
+mod auth;
 mod cli;
 mod render;
 mod server;

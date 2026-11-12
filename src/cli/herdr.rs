@@ -151,7 +151,7 @@ impl Herdr<'_> {
     /// A pane split here is closed again when the preview does not come up in
     /// it, rather than left as an empty shell the next run would not recognise.
     pub fn open_preview(&self, file: &Path) -> Result<&'static str, Failure> {
-        let url = self.server.preview_url(file, "pane");
+        let url = self.server.preview_url(file, "pane")?;
         let (opened, new_pane) = match self.browser_here()? {
             Some(browser) => {
                 // Its failure shows up as the wait below timing out.
@@ -234,7 +234,7 @@ impl Herdr<'_> {
         } else {
             preview.clone()
         };
-        let url = serde_json::to_string(&self.server.preview_url(file, "pane"))
+        let url = serde_json::to_string(&self.server.preview_url(file, "pane")?)
             .expect("a string serializes");
         let script = format!("setTimeout(() => location.replace({url}), 0); true");
         let navigated = quietly(
