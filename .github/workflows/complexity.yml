@@ -6,6 +6,8 @@ name: Complexity
 
 on:
   pull_request:
+  # Dispatched by the "Sync vendored assets" workflow after it pushes to a Dependabot branch.
+  workflow_dispatch:
   push:
     branches: [main]
 

@@ -16,8 +16,8 @@ updates:
       dependencies:
         patterns: ["*"]
   # The browser assets embedded in the binary. A bump here only changes the
-  # lockfile; the "Vendored assets" check then fails until
-  # packaging/vendor/update.sh is run on the branch and the result committed.
+  # lockfile; the "Sync vendored assets" workflow regenerates assets/vendor on
+  # the pull request.
   - package-ecosystem: "npm"
     directory: "/packaging/vendor"
     schedule:

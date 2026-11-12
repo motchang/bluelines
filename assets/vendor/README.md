@@ -10,11 +10,11 @@ edit them by hand.
 
 | File | Package | Path in package | License |
 | --- | --- | --- | --- |
-| `github-markdown.css` | `github-markdown-css@5.9.0` | `github-markdown.css` | MIT, `LICENSE-github-markdown-css` |
-| `hljs-github.min.css` | `@highlightjs/cdn-assets@11.11.1` | `styles/github.min.css` | BSD-3-Clause, `LICENSE-highlight.js` |
-| `hljs-github-dark.min.css` | `@highlightjs/cdn-assets@11.11.1` | `styles/github-dark.min.css` | BSD-3-Clause, `LICENSE-highlight.js` |
-| `highlight.all.min.js` | `@highlightjs/cdn-assets@11.11.1` | `highlight.min.js` and `languages/*.min.js` | BSD-3-Clause, `LICENSE-highlight.js` |
-| `mermaid.min.js` | `mermaid@11.16.0` | `dist/mermaid.min.js` | MIT, `LICENSE-mermaid` |
+| `github-markdown.css` | `github-markdown-css` | `github-markdown.css` | MIT, `LICENSE-github-markdown-css` |
+| `hljs-github.min.css` | `@highlightjs/cdn-assets` | `styles/github.min.css` | BSD-3-Clause, `LICENSE-highlight.js` |
+| `hljs-github-dark.min.css` | `@highlightjs/cdn-assets` | `styles/github-dark.min.css` | BSD-3-Clause, `LICENSE-highlight.js` |
+| `highlight.all.min.js` | `@highlightjs/cdn-assets` | `highlight.min.js` and `languages/*.min.js` | BSD-3-Clause, `LICENSE-highlight.js` |
+| `mermaid.min.js` | `mermaid` | `dist/mermaid.min.js` | MIT, `LICENSE-mermaid` |
 
 `highlight.all.min.js` is the only file that is not a straight copy. The
 package's `highlight.min.js` registers just the 36 common languages, while the
@@ -30,16 +30,14 @@ necessarily the ones mermaid bundled.
 ## Updating
 
 Dependabot checks `packaging/vendor` daily and opens a pull request that bumps
-`package.json` and `package-lock.json`. The "Vendored assets" check fails on
-that pull request until the files here are regenerated:
+`package.json` and `package-lock.json`. The "Sync vendored assets" workflow
+then runs `packaging/vendor/update.sh` on that pull request, commits the
+regenerated files to its branch, and runs the checks again on the new commit.
+Review the diff of the bundles like any other change.
 
-```sh
-packaging/vendor/update.sh
-```
-
-Commit the result to the same branch. To bump a version by hand, edit
-`package.json`, run `npm install --package-lock-only --ignore-scripts` in
-`packaging/vendor`, then run the script. `update.sh --check` verifies the files
+To bump a version by hand, edit `package.json`, run
+`npm install --package-lock-only --ignore-scripts` in `packaging/vendor`, then
+run `packaging/vendor/update.sh` and commit the result. `update.sh --check` verifies the files
 here without changing them.
 
 The page's chrome copies a few color values from `github-markdown.css` (see

@@ -78,7 +78,9 @@ mod tests {
     fn highlighter_carries_every_language() {
         let script = String::from_utf8_lossy(get("/assets/highlight.js").unwrap().bytes);
         let grammars = script.matches("grammar compiled for Highlight.js").count();
-        assert_eq!(grammars, 192);
+        // Far more than the 36 common languages the package's bundle alone has;
+        // not an exact count, so a release that adds a grammar does not fail it.
+        assert!(grammars > 150, "{grammars} grammars");
         for language in ["dockerfile", "powershell", "elixir", "nix"] {
             let marker = format!("`{language}` grammar compiled");
             assert!(script.contains(&marker), "{language}");
