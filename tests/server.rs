@@ -1,6 +1,6 @@
 //! Integration tests for the render server: each test starts `blueline serve`
 //! on a free port and talks to it over plain HTTP, with the token from the
-//! token file and the cookie a ticket gets, the way the CLI and a browser do.
+//! token file and the view key a ticket gets, the way the CLI and a browser do.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -22,7 +22,8 @@ struct Server {
     /// The server's TMPDIR, which its token file goes under.
     state: tempfile::TempDir,
     token: String,
-    cookie: String,
+    /// The view key a redeemed ticket gave.
+    key: String,
 }
 
 impl Server {
@@ -53,16 +54,16 @@ impl Server {
             port,
             state,
             token: String::new(),
-            cookie: String::new(),
+            key: String::new(),
         };
         server.token = std::fs::read_to_string(server.token_path()).expect("a token file");
         let ticket = server.ticket();
         let redeemed = server.anonymous("GET", &format!("/?ticket={ticket}"), &[], None);
         assert_eq!(redeemed.status, 303);
-        server.cookie = redeemed
-            .header("set-cookie")
-            .and_then(|c| c.split(';').next())
-            .expect("a cookie")
+        server.key = redeemed
+            .header("location")
+            .and_then(|l| l.strip_prefix("/?key="))
+            .expect("a key")
             .to_owned();
         server
     }
@@ -108,7 +109,13 @@ impl Server {
         )
     }
 
-    /// A request with the token and the cookie, as the CLI and a browser it
+    /// `target` with the view key added to its query.
+    fn keyed(&self, target: &str) -> String {
+        let sep = if target.contains('?') { '&' } else { '?' };
+        format!("{target}{sep}key={}", self.key)
+    }
+
+    /// A request with the token and the view key, as the CLI and a browser it
     /// handed a page to would send.
     fn request(
         &self,
@@ -118,12 +125,9 @@ impl Server {
         body: Option<&str>,
     ) -> Reply {
         let bearer = format!("Bearer {}", self.token);
-        let mut all = vec![
-            ("authorization", bearer.as_str()),
-            ("cookie", self.cookie.as_str()),
-        ];
+        let mut all = vec![("authorization", bearer.as_str())];
         all.extend_from_slice(headers);
-        self.anonymous(method, target, &all, body)
+        self.anonymous(method, &self.keyed(target), &all, body)
     }
 
     /// A request with neither, as any other local process could send.
@@ -146,9 +150,9 @@ impl Server {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         write!(
             stream,
-            "GET {target} HTTP/1.1\r\nhost: {}\r\ncookie: {}\r\naccept: text/event-stream\r\n\r\n",
-            self.host(),
-            self.cookie
+            "GET {} HTTP/1.1\r\nhost: {}\r\naccept: text/event-stream\r\n\r\n",
+            self.keyed(target),
+            self.host()
         )
         .unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -392,7 +396,7 @@ fn other_local_processes_get_nothing() {
         }
     }
 
-    // No cookie: not even a registered file is shown.
+    // No view key: not even a registered file is shown.
     assert_eq!(server.open(&doc, Some(false)).status, 200);
     for target in [
         format!("/?file={}", query(&doc)),
@@ -404,8 +408,9 @@ fn other_local_processes_get_nothing() {
         assert_eq!(reply.status, 403, "{target}");
         assert!(!reply.body.contains("private"), "{target}");
     }
-    let forged = format!("blueline-{}=00", server.port);
-    let reply = server.anonymous("GET", "/", &[("cookie", &forged)], None);
+    let reply = server.anonymous("GET", "/?key=00", &[], None);
+    assert_eq!(reply.status, 403);
+    let reply = server.anonymous("GET", "/?key=", &[], None);
     assert_eq!(reply.status, 403);
     // The assets hold nothing of the user's.
     let reply = server.anonymous("GET", "/assets/highlight.js", &[], None);
@@ -424,31 +429,24 @@ fn a_ticket_is_good_once() {
     let target = format!("/?file={}&surface=pane&ticket={ticket}", query(&doc));
     let first = server.anonymous("GET", &target, &[], None);
     assert_eq!(first.status, 303);
+    // The key takes the ticket's place, and nothing is left in a cookie for
+    // the browser to hand to other servers on 127.0.0.1.
     assert_eq!(
         first.header("location"),
-        Some(format!("/?file={}&surface=pane", query(&doc)).as_str())
+        Some(format!("/?file={}&surface=pane&key={}", query(&doc), server.key).as_str())
     );
-    let cookie = first.header("set-cookie").unwrap();
-    assert!(cookie.starts_with(&format!("blueline-{}=", server.port)));
-    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
-    let cookie = cookie.split(';').next().unwrap().to_owned();
-    let page = server.anonymous(
-        "GET",
-        first.header("location").unwrap(),
-        &[("cookie", &cookie)],
-        None,
-    );
+    assert!(first.header("set-cookie").is_none());
+    assert_eq!(first.header("referrer-policy"), Some("no-referrer"));
+    let page = server.anonymous("GET", first.header("location").unwrap(), &[], None);
     assert_eq!(page.status, 200);
     assert!(page.body.contains("<title>a b.md</title>"));
+    // The page's URL holds the key, and nothing on it may pass that on.
+    assert_eq!(page.header("referrer-policy"), Some("no-referrer"));
 
-    // Spent: a second browser gets nothing for it, while one that already has
-    // the cookie is just sent on.
+    // Spent: it gets nothing a second time.
     let again = server.anonymous("GET", &target, &[], None);
     assert_eq!(again.status, 403);
-    assert!(again.header("set-cookie").is_none());
-    let again = server.anonymous("GET", &target, &[("cookie", &cookie)], None);
-    assert_eq!(again.status, 303);
-    assert!(again.header("set-cookie").is_none());
+    assert!(again.header("location").is_none());
 
     let reply = server.anonymous("GET", "/?ticket=nope", &[], None);
     assert_eq!(reply.status, 403);
@@ -550,10 +548,11 @@ fn only_registered_paths_are_served() {
     );
     assert!(page.body.contains("<title>doc.md</title>"));
     assert!(page.body.contains("hello <em>world</em>"));
-    assert!(
-        page.body
-            .contains(&format!("\"/events?file={}&surface=tab\"", query(&doc)))
-    );
+    assert!(page.body.contains(&format!(
+        "\"/events?file={}&surface=tab&key={}\"",
+        query(&doc),
+        server.key
+    )));
 }
 
 #[test]
@@ -585,13 +584,15 @@ fn relative_links_and_images_are_served_through_the_document() {
 
     let page = server.get(&format!("/?file={}&surface=pane", query(&doc)));
     assert!(page.body.contains(&format!(
-        "href=\"/?file={}&amp;surface=pane#intro\"",
-        query(&linked)
+        "href=\"/?file={}&amp;surface=pane&amp;key={}#intro\"",
+        query(&linked),
+        server.key
     )));
-    assert!(
-        page.body
-            .contains(&format!("src=\"/image?file={}\"", query(&picture)))
-    );
+    assert!(page.body.contains(&format!(
+        "src=\"/image?file={}&amp;key={}\"",
+        query(&picture),
+        server.key
+    )));
     assert!(page.body.contains("href=\"https://example.com/x.md\""));
     assert!(
         page.body
@@ -642,7 +643,10 @@ fn bare_root_shows_the_current_file() {
     server.open(&tab, Some(false));
     let page = server.get("/?surface=pane");
     assert!(page.body.contains("pane body"));
-    assert!(page.body.contains("\"/events?surface=pane\""));
+    assert!(
+        page.body
+            .contains(&format!("\"/events?surface=pane&key={}\"", server.key))
+    );
 }
 
 #[test]

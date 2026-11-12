@@ -16,10 +16,12 @@
 //! Nothing here trusts a request for coming from this machine: the loopback
 //! port is open to every local user and process. The tooling routes need the
 //! token in this user's token file (see `auth`), and pages, their images and
-//! their reload streams need the cookie a browser gets by redeeming a ticket
-//! the CLI asked for. A ticket is good once, so the URL the CLI hands to a
-//! browser, which other users can read in its command line, is spent by the
-//! time they could use it.
+//! their reload streams need the view key, which a browser gets by redeeming a
+//! ticket the CLI asked for. A ticket is good once, so the URL the CLI hands to
+//! a browser, which other users can read in its command line, is spent by the
+//! time they could use it. The key then rides in the page's own URLs rather
+//! than in a cookie: cookies are not kept apart by port, so a browser would
+//! hand one to every other server on 127.0.0.1 it visits.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -212,10 +214,10 @@ struct Inner {
     port: u16,
     /// The tooling routes' bearer token, also in this user's token file.
     token: String,
-    /// The cookie a browser gets for redeeming a ticket, which lets it read
+    /// The key a browser gets for redeeming a ticket, which lets it read
     /// pages. Made fresh for each run: a tab left over from an earlier server
     /// has to be handed a ticket again.
-    view_secret: String,
+    view_key: String,
     /// Tickets `/ticket` handed out and nobody has redeemed yet.
     tickets: Vec<(String, Instant)>,
     /// Every path `/open` accepted or a registered document linked to; the only
@@ -243,7 +245,7 @@ impl Shared {
         Shared(Arc::new(Mutex::new(Inner {
             port,
             token,
-            view_secret: auth::random_hex(32),
+            view_key: auth::random_hex(32),
             tickets: Vec::new(),
             registered: HashSet::new(),
             images: HashMap::new(),
@@ -447,19 +449,16 @@ impl Shared {
             .any(|offered| auth::same_secret(offered.trim(), &token))
     }
 
-    /// Whether a request carries the cookie a redeemed ticket set.
-    fn has_view_cookie(&self, headers: &HeaderMap) -> bool {
-        let (name, secret) = {
-            let inner = self.lock();
-            (cookie_name(inner.port), inner.view_secret.clone())
-        };
-        headers
-            .get_all(header::COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(';'))
-            .filter_map(|pair| pair.trim().split_once('='))
-            .any(|(key, value)| key == name && auth::same_secret(value, &secret))
+    /// Whether a request's query carries the view key.
+    fn has_view_key(&self, query: &Query) -> bool {
+        let key = self.view_key();
+        query
+            .get("key")
+            .is_some_and(|offered| auth::same_secret(offered, &key))
+    }
+
+    fn view_key(&self) -> String {
+        self.lock().view_key.clone()
     }
 
     /// Browser tabs connected to `key`, not counting panes.
@@ -608,18 +607,15 @@ impl Query {
             .map(|(_, value)| value.as_str())
     }
 
-    /// `/` with this query, less every `name` parameter.
-    fn without(&self, name: &str) -> String {
+    /// `/` with this query, less every `old` and `new` parameter, and with
+    /// `new` set to `value` at the end.
+    fn replacing(&self, old: &str, new: &str, value: &str) -> String {
         let mut params = form_urlencoded::Serializer::new(String::new());
-        for (key, value) in self.0.iter().filter(|(key, _)| key != name) {
+        for (key, value) in self.0.iter().filter(|(key, _)| key != old && key != new) {
             params.append_pair(key, value);
         }
-        let query = params.finish();
-        if query.is_empty() {
-            "/".to_owned()
-        } else {
-            format!("/?{query}")
-        }
+        params.append_pair(new, value);
+        format!("/?{}", params.finish())
     }
 }
 
@@ -636,23 +632,17 @@ async fn handle(State(state): State<Shared>, request: Request) -> Response {
     }
 }
 
-/// The cookie a redeemed ticket sets. Cookies are not kept apart by port, so
-/// the port is in the name to keep two servers' from overwriting each other.
-fn cookie_name(port: u16) -> String {
-    format!("blueline-{port}")
-}
-
 /// The routes that read the user's files: pages, their images and their reload
-/// streams. Each needs the cookie a ticket gets, and a page URL carrying a
+/// streams. Each needs the view key in its query, and a page URL carrying a
 /// ticket is how a browser gets it.
 async fn viewing(state: &Shared, request: Request, query: &Query) -> Response {
     let path = request.uri().path().to_owned();
     if path == "/" {
         if let Some(ticket) = query.get("ticket") {
-            return redeem(state, request.headers(), query, ticket);
+            return redeem(state, query, ticket);
         }
     }
-    if !state.has_view_cookie(request.headers()) {
+    if !state.has_view_key(query) {
         return not_handed_over();
     }
     match path.as_str() {
@@ -669,32 +659,24 @@ fn not_handed_over() -> Response {
     )
 }
 
-/// Spends a ticket for the cookie, and sends the browser on to the same URL
-/// without it, so that a reload or a bookmark never carries a spent ticket. A
-/// spent or unknown ticket is let through only for a browser that already has
-/// the cookie.
-fn redeem(state: &Shared, headers: &HeaderMap, query: &Query, ticket: &str) -> Response {
-    let mut response_headers = HeaderMap::new();
-    if state.redeem_ticket(ticket) {
-        let cookie = {
-            let inner = state.lock();
-            format!(
-                "{}={}; Path=/; HttpOnly; SameSite=Strict",
-                cookie_name(inner.port),
-                inner.view_secret
-            )
-        };
-        if let Ok(value) = HeaderValue::from_str(&cookie) {
-            response_headers.insert(header::SET_COOKIE, value);
-        }
-    } else if !state.has_view_cookie(headers) {
+/// Spends a ticket and sends the browser on to the same URL with the view key
+/// in place of it, so that a reload or a bookmark never carries a spent
+/// ticket. A spent or unknown ticket gets nothing.
+fn redeem(state: &Shared, query: &Query, ticket: &str) -> Response {
+    if !state.redeem_ticket(ticket) {
         return not_handed_over();
     }
-    if let Ok(location) = HeaderValue::from_str(&query.without("ticket")) {
-        response_headers.insert(header::LOCATION, location);
+    let location = query.replacing("ticket", "key", &state.view_key());
+    let mut headers = HeaderMap::new();
+    if let Ok(location) = HeaderValue::from_str(&location) {
+        headers.insert(header::LOCATION, location);
     }
-    response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    (StatusCode::SEE_OTHER, response_headers).into_response()
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    (StatusCode::SEE_OTHER, headers).into_response()
 }
 
 /// Whether the Host header names this server. A DNS rebinding attack resolves
@@ -944,7 +926,8 @@ async fn page(state: &Shared, query: &Query) -> Response {
         return text(StatusCode::NOT_FOUND, "not found");
     };
     let surface = Surface::parse(query.get("surface"));
-    let events = events_url(query.get("file"), surface);
+    let key = state.view_key();
+    let events = events_url(query.get("file"), surface, &key);
     let Some(file) = file else {
         let shell = Shell {
             nonce: &nonce,
@@ -981,7 +964,7 @@ async fn page(state: &Shared, query: &Query) -> Response {
     };
 
     let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut links = LinkRewriter::new(dir, surface);
+    let mut links = LinkRewriter::new(dir, surface, key);
     let rendered = render::render(&source, &mut |kind, url| links.rewrite(kind, url));
     {
         let mut inner = state.lock();
@@ -1009,6 +992,12 @@ fn html_response(nonce: &str, body: String) -> Response {
     if let Ok(csp) = HeaderValue::from_str(&content_security_policy(nonce)) {
         headers.insert(header::CONTENT_SECURITY_POLICY, csp);
     }
+    // The page's URL carries the view key, and a link or a remote image must
+    // not take it along.
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     (headers, body).into_response()
 }
 
@@ -1040,13 +1029,14 @@ fn content_security_policy(nonce: &str) -> String {
     .join("; ")
 }
 
-/// The `/events` URL for a page, carrying its file and surface.
-fn events_url(file: Option<&str>, surface: Surface) -> String {
+/// The `/events` URL for a page, carrying its file, surface and view key.
+fn events_url(file: Option<&str>, surface: Surface, key: &str) -> String {
     let mut params = form_urlencoded::Serializer::new(String::new());
     if let Some(file) = file {
         params.append_pair("file", file);
     }
     params.append_pair("surface", surface.as_str());
+    params.append_pair("key", key);
     format!("/events?{}", params.finish())
 }
 
@@ -1078,15 +1068,18 @@ fn render_toc(headings: &[render::Heading]) -> String {
 struct LinkRewriter {
     dir: PathBuf,
     surface: Surface,
+    /// The view key, which every URL to this server has to carry.
+    key: String,
     documents: Vec<PathBuf>,
     images: Vec<(PathBuf, &'static str)>,
 }
 
 impl LinkRewriter {
-    fn new(dir: PathBuf, surface: Surface) -> Self {
+    fn new(dir: PathBuf, surface: Surface, key: String) -> Self {
         LinkRewriter {
             dir,
             surface,
+            key,
             documents: Vec::new(),
             images: Vec::new(),
         }
@@ -1111,6 +1104,7 @@ impl LinkRewriter {
         let params = form_urlencoded::Serializer::new(String::new())
             .append_pair("file", &file.to_string_lossy())
             .append_pair("surface", self.surface.as_str())
+            .append_pair("key", &self.key)
             .finish();
         self.documents.push(file);
         Some(format!("/?{params}{hash}"))
@@ -1123,6 +1117,7 @@ impl LinkRewriter {
         let content_type = image_type(&file)?;
         let params = form_urlencoded::Serializer::new(String::new())
             .append_pair("file", &file.to_string_lossy())
+            .append_pair("key", &self.key)
             .finish();
         self.images.push((file, content_type));
         Some(format!("/image?{params}{hash}"))
@@ -1331,13 +1326,13 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "x").unwrap();
         std::fs::write(root.join("data.bin"), "x").unwrap();
 
-        let mut links = LinkRewriter::new(root.clone(), Surface::Pane);
+        let mut links = LinkRewriter::new(root.clone(), Surface::Pane, "k".to_owned());
         let doc = root.join("other doc.md");
         let encoded: String =
             form_urlencoded::byte_serialize(doc.to_string_lossy().as_bytes()).collect();
         assert_eq!(
             links.rewrite(Reference::Link, "other%20doc.md#Part"),
-            Some(format!("/?file={encoded}&surface=pane#Part"))
+            Some(format!("/?file={encoded}&surface=pane&key=k#Part"))
         );
         assert_eq!(links.rewrite(Reference::Link, "notes.txt"), None);
         assert_eq!(links.rewrite(Reference::Link, "missing.md"), None);
@@ -1353,7 +1348,7 @@ mod tests {
             form_urlencoded::byte_serialize(pic.to_string_lossy().as_bytes()).collect();
         assert_eq!(
             links.rewrite(Reference::Image, "./pic.svg#view"),
-            Some(format!("/image?file={encoded}#view"))
+            Some(format!("/image?file={encoded}&key=k#view"))
         );
         assert_eq!(links.rewrite(Reference::Image, "data.bin"), None);
         assert_eq!(links.images, vec![(pic, "image/svg+xml")]);
@@ -1375,10 +1370,13 @@ mod tests {
     #[test]
     fn events_url_encodes_like_url_search_params() {
         assert_eq!(
-            events_url(Some("/a b/</script>&#.md"), Surface::Tab),
-            "/events?file=%2Fa+b%2F%3C%2Fscript%3E%26%23.md&surface=tab"
+            events_url(Some("/a b/</script>&#.md"), Surface::Tab, "k"),
+            "/events?file=%2Fa+b%2F%3C%2Fscript%3E%26%23.md&surface=tab&key=k"
         );
-        assert_eq!(events_url(None, Surface::Pane), "/events?surface=pane");
+        assert_eq!(
+            events_url(None, Surface::Pane, "k"),
+            "/events?surface=pane&key=k"
+        );
     }
 
     #[test]

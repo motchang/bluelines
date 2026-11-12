@@ -126,12 +126,15 @@ server trusts none of them for being local. When it starts it writes a random
 token to `blueline-<uid>/server-<port>.token` under `$XDG_RUNTIME_DIR`, or
 `$TMPDIR` or `/tmp` without one, in a directory and file only you can read.
 Registering a file, stopping the server and asking for a page ticket all need
-that token. Pages, their images and their reload streams need a cookie instead,
-which a browser gets by visiting a preview URL with a single-use ticket in it;
-the server swaps the ticket for the cookie and drops it from the address. A
-browser tab blueline did not open, or one left over from an earlier server, is
-refused until `blueline <file.md>` opens it again. A bare `/` is a page like any
-other: it works in a browser that has been handed one.
+that token. Pages, their images and their reload streams need a view key
+instead, which a browser gets by visiting a preview URL with a single-use ticket
+in it: the server swaps the ticket for the key in the address, and the page's
+own links, images and reload stream carry it from there. It is not a cookie,
+because a browser sends cookies for 127.0.0.1 to every port on it, and pages are
+served with `Referrer-Policy: no-referrer` so that following a link does not
+pass the key on either. A browser tab blueline did not open, or one left over
+from an earlier server, is refused until `blueline <file.md>` opens it again. A
+bare `/` is a page like any other and needs the key too.
 
 Before blueline sends anything to the server on the port, the server has to
 answer a fresh challenge with an HMAC keyed by the token. A process that took
