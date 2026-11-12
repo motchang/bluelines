@@ -1,0 +1,50 @@
+# Fails when a workflow uses an action that is not pinned to a full-length
+# commit SHA, e.g. `actions/checkout@v7` instead of
+# `actions/checkout@<40-char sha> # v7.0.1`.
+#
+# The check is done by pinact (https://github.com/suzuki-shunsuke/pinact)
+# offline (--no-api): it only verifies the syntax of each `uses:` and needs no
+# token. To pin a new action locally, run `pinact run`.
+name: Pinned actions
+
+on:
+  pull_request:
+    paths: [.github/**]
+  push:
+    branches: [main]
+    paths: [.github/**]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinned-actions-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PINACT_VERSION: 5.0.2
+  # sha256 of pinact_linux_amd64.tar.gz, from pinact_<version>_checksums.txt.
+  PINACT_SHA256: 7f003d8f51e984c2264d2009d430e3e0e87ae404a0e2dc2a9a277b0f731bf5b7
+
+jobs:
+  pinact:
+    name: Check actions are pinned to commit SHAs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinact
+        run: |
+          curl -sSfL -o pinact.tar.gz \
+            "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_amd64.tar.gz"
+          echo "${PINACT_SHA256}  pinact.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/pinact"
+          tar -xzf pinact.tar.gz -C "$RUNNER_TEMP/pinact" pinact
+          rm pinact.tar.gz
+          echo "$RUNNER_TEMP/pinact" >> "$GITHUB_PATH"
+
+      - name: Check
+        run: pinact run --fix=false --no-api
