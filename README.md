@@ -18,22 +18,22 @@ browser. `.md`, `.markdown` and `.mdown` all count as markdown.
 ## Install
 
 blueline is a single binary. The command is `blueline`; the crate is called
-`bluelines`, because `blueline` was already taken on crates.io. Until the first
-release is on crates.io and Homebrew, install it from this repository with
-[Rust](https://rustup.rs) 1.85 or newer:
-
-	cargo install --locked --git https://github.com/motchang/bluelines
-
-Once it is released, either of these will do (the Homebrew formula installs
-the prebuilt binary, so it needs no Rust toolchain):
+`bluelines`. Install it with any of:
 
 	cargo install --locked bluelines
 	brew install motchang/tap/blueline
 
+The Homebrew formula installs a prebuilt binary, so it needs no Rust
+toolchain. `cargo install` needs [Rust](https://rustup.rs) 1.85 or newer.
+
 Each [GitHub Release](https://github.com/motchang/bluelines/releases) also has
 prebuilt binaries for macOS (Apple silicon and Intel) and Linux (x86_64 and
-aarch64, statically linked), which need no Rust toolchain: unpack the archive
-for your platform and put `blueline` on PATH.
+aarch64, statically linked): unpack the archive for your platform and put
+`blueline` on PATH.
+
+To build the latest `main` instead:
+
+	cargo install --locked --git https://github.com/motchang/bluelines
 
 `cargo install` puts the binary in `~/.cargo/bin`. Make sure that directory is
 on PATH for every shell, not only interactive ones, so that an agent's Bash
@@ -41,40 +41,14 @@ finds it too.
 
 At run time blueline needs `open` (macOS) or `xdg-open` (Linux) to open a
 browser tab. `--term`, `--pane`, `--reset` and `blueline --` also need herdr and
-terminal-browser. Nothing else: there is no bun, curl, jq or lsof to install.
-
-### Moving from the bun version
-
-Earlier versions were a shell script (`bin/blueline`) and a bun render server
-(`blueline-server/`), run from a clone of this repository. The Rust binary does
-not recognise a render server the bun version started, so one left running on
-the port would keep serving pages with the old code. Before switching:
-
-1. Stop the old server with the old command, while it is still on PATH:
-
-		blueline --stop
-
-2. Remove the symlink the old install steps made, so that it does not shadow the
-   new binary:
-
-		rm -f ~/bin/blueline
-
-3. Install the Rust binary as above and check that `command -v blueline` points
-   at it.
-
-The clone, and bun itself if nothing else uses it, can go too. `BLUELINE_PORT`
-and the log at `${TMPDIR}/blueline-server.log` are unchanged.
-
-Coming from mdpreview in motchang/dotfiles: run `mdpreview --stop` first, then
-`rm -f ~/bin/mdpreview`, for the same reason. `MDPREVIEW_PORT` is not read - set
-`BLUELINE_PORT` if you had changed it.
+terminal-browser.
 
 ## Usage
 
 The port is 43128 by default; `BLUELINE_PORT` overrides it.
 
 	blueline README.md            # a desktop browser tab
-	blueline --browser README.md  # the same; kept from when a pane was the default
+	blueline --browser README.md  # the same, spelled out
 	blueline --browser            # a tab on the file most recently previewed
 	blueline --term README.md     # a terminal-browser pane in this herdr tab
 	blueline -- snapshot          # a `terminal-browser action` page command, aimed at this tab's pane preview
@@ -122,8 +96,8 @@ Previews are independent of each other. Each page carries its own file in its
 URL - `/?file=<path>` - so a pane in this tab, a pane in another and any number
 of browser tabs each hold a different file, and saving one reloads only the pages
 showing that one. `blueline B.md` while a pane shows `A.md` leaves that pane on
-`A.md`. Only a bare `/`, which is what a hand-typed URL and a page from before
-this gets, follows a file it was not told about - and it follows the one the pane
+`A.md`. Only a bare `/`, such as a hand-typed URL, follows a file it was not told
+about - and it follows the one the pane
 modes last opened, not the most recent of all: `blueline B.md` leaves a bare-`/`
 page on `A.md` too, which is the same distinction `--reset` and `--browser` draw
 between them above.
@@ -139,7 +113,7 @@ apart from a tab that never opened. A spare tab is the better failure than
 refusing to show a preview that is not on screen. Panes are not counted either;
 a pane on the file is no reason to withhold a tab from someone who asked for one.
 
-What a tab still cannot do is be driven. `blueline -- <command>` needs a
+What a tab cannot do is be driven. `blueline -- <command>` needs a
 terminal-browser preview, so inside a herdr session it reports having no preview
 in this tab even while a browser tab is open on one, and points at `--term`.
 
@@ -160,7 +134,7 @@ closing a tab, and refuses `launch`, `install`, `connect`, `disconnect` and the
 `--cdp`, `--session` and similar flags outright. Those commands reach the page over CDP, which gets to a
 terminal-browser tab and to nothing else, so outside herdr they say so rather
 than answering about a browser in some other tab. A bare word that is not a
-markdown path - `blueline snapshot`, the old way of writing this - is refused
+markdown path, such as `blueline snapshot`, is refused
 with a pointer to `--`. `--pane`, `--reset` and `--term` need a herdr tab to
 look in as well.
 
