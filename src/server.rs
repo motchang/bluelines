@@ -12,6 +12,16 @@
 //! `POST /open`, which only local tooling can reach, or by being the target of a
 //! relative link inside a document that was already registered. Anything else
 //! answers 404, the same answer for a file that exists and one that does not.
+//!
+//! Nothing here trusts a request for coming from this machine: the loopback
+//! port is open to every local user and process. The tooling routes need the
+//! token in this user's token file (see `auth`), and pages, their images and
+//! their reload streams need the view key, which a browser gets by redeeming a
+//! ticket the CLI asked for. A ticket is good once, so the URL the CLI hands to
+//! a browser, which other users can read in its command line, is spent by the
+//! time they could use it. The key then rides in the page's own URLs rather
+//! than in a cookie: cookies are not kept apart by port, so a browser would
+//! hand one to every other server on 127.0.0.1 it visits.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -37,6 +47,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::assets;
+use crate::auth;
 use crate::cli::ServeArgs;
 use crate::render::{self, Reference, escape_html};
 
@@ -58,6 +69,13 @@ const IMAGE_TYPES: &[(&str, &str)] = &[
 /// How long after the last file event a reload goes out. Editors that save by
 /// writing a temporary file and renaming it produce a burst of events.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(50);
+
+/// How long a ticket from `/ticket` can wait to be redeemed. A cold
+/// terminal-browser takes a few seconds to load its first page.
+const TICKET_LIFETIME: Duration = Duration::from_secs(120);
+
+/// Unredeemed tickets kept at most; the oldest goes first.
+const TICKETS_KEPT: usize = 32;
 
 /// How often an idle reload stream gets a comment line. Writing is the only way
 /// to notice that a page has gone away, and `/viewers` counts on noticing.
@@ -97,10 +115,19 @@ async fn serve(port: u16) -> ExitCode {
     };
     ignore_hangup();
 
-    let state = Shared::new(port);
+    // Written once the port is ours, so a server that lost the race for it
+    // never overwrites the token of the one that won.
+    let token = auth::new_token();
+    if let Err(error) = auth::write_token(port, &token) {
+        eprintln!("blueline-server: cannot write the token file: {error}");
+        return ExitCode::FAILURE;
+    }
+    let state = Shared::new(port, token.clone());
     let app = Router::new().fallback(handle).with_state(state);
     println!("blueline-server listening on http://127.0.0.1:{port}");
-    if let Err(error) = axum::serve(listener, app).await {
+    let served = axum::serve(listener, app).await;
+    auth::remove_token(port, &token);
+    if let Err(error) = served {
         eprintln!("blueline-server: {error}");
         return ExitCode::FAILURE;
     }
@@ -185,6 +212,14 @@ impl Drop for Watch {
 
 struct Inner {
     port: u16,
+    /// The tooling routes' bearer token, also in this user's token file.
+    token: String,
+    /// The key a browser gets for redeeming a ticket, which lets it read
+    /// pages. Made fresh for each run: a tab left over from an earlier server
+    /// has to be handed a ticket again.
+    view_key: String,
+    /// Tickets `/ticket` handed out and nobody has redeemed yet.
+    tickets: Vec<(String, Instant)>,
     /// Every path `/open` accepted or a registered document linked to; the only
     /// paths `?file=` renders. It only grows: evicting would mean refusing a
     /// path someone may still have a tab on.
@@ -206,9 +241,12 @@ struct Inner {
 struct Shared(Arc<Mutex<Inner>>);
 
 impl Shared {
-    fn new(port: u16) -> Self {
+    fn new(port: u16, token: String) -> Self {
         Shared(Arc::new(Mutex::new(Inner {
             port,
+            token,
+            view_key: auth::random_hex(32),
+            tickets: Vec::new(),
             registered: HashSet::new(),
             images: HashMap::new(),
             last_opened: None,
@@ -372,6 +410,57 @@ impl Shared {
         }
     }
 
+    /// A new single-use ticket. Unredeemed ones expire, and only the newest
+    /// few are kept.
+    fn issue_ticket(&self) -> String {
+        let ticket = auth::random_hex(32);
+        let mut inner = self.lock();
+        inner
+            .tickets
+            .retain(|(_, issued)| issued.elapsed() < TICKET_LIFETIME);
+        if inner.tickets.len() >= TICKETS_KEPT {
+            inner.tickets.remove(0);
+        }
+        inner.tickets.push((ticket.clone(), Instant::now()));
+        ticket
+    }
+
+    /// Spends `ticket`, returning whether it was a live one.
+    fn redeem_ticket(&self, ticket: &str) -> bool {
+        let mut inner = self.lock();
+        inner
+            .tickets
+            .retain(|(_, issued)| issued.elapsed() < TICKET_LIFETIME);
+        let found = inner
+            .tickets
+            .iter()
+            .position(|(issued, _)| auth::same_secret(issued, ticket));
+        found.map(|at| inner.tickets.remove(at)).is_some()
+    }
+
+    /// Whether a request carries the tooling token.
+    fn has_token(&self, headers: &HeaderMap) -> bool {
+        let token = self.lock().token.clone();
+        headers
+            .get_all(header::AUTHORIZATION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.strip_prefix("Bearer "))
+            .any(|offered| auth::same_secret(offered.trim(), &token))
+    }
+
+    /// Whether a request's query carries the view key.
+    fn has_view_key(&self, query: &Query) -> bool {
+        let key = self.view_key();
+        query
+            .get("key")
+            .is_some_and(|offered| auth::same_secret(offered, &key))
+    }
+
+    fn view_key(&self) -> String {
+        self.lock().view_key.clone()
+    }
+
     /// Browser tabs connected to `key`, not counting panes.
     fn tabs_showing(&self, key: &Key) -> usize {
         self.lock().channels.get(key).map_or(0, |channel| {
@@ -517,6 +606,17 @@ impl Query {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+
+    /// `/` with this query, less every `old` and `new` parameter, and with
+    /// `new` set to `value` at the end.
+    fn replacing(&self, old: &str, new: &str, value: &str) -> String {
+        let mut params = form_urlencoded::Serializer::new(String::new());
+        for (key, value) in self.0.iter().filter(|(key, _)| key != old && key != new) {
+            params.append_pair(key, value);
+        }
+        params.append_pair(new, value);
+        format!("/?{}", params.finish())
+    }
 }
 
 async fn handle(State(state): State<Shared>, request: Request) -> Response {
@@ -525,13 +625,58 @@ async fn handle(State(state): State<Shared>, request: Request) -> Response {
     }
     let query = Query::parse(&request);
     match request.uri().path() {
-        "/open" | "/shutdown" | "/viewers" => tooling(&state, request, &query).await,
-        "/health" => health(&state),
-        "/events" => events(&state, &query),
-        "/image" => image(&state, &query).await,
-        "/" => page(&state, &query).await,
+        "/open" | "/shutdown" | "/viewers" | "/ticket" => tooling(&state, request, &query).await,
+        "/health" => health(&state, request.headers()),
+        "/" | "/events" | "/image" => viewing(&state, request, &query).await,
         path => asset(path),
     }
+}
+
+/// The routes that read the user's files: pages, their images and their reload
+/// streams. Each needs the view key in its query, and a page URL carrying a
+/// ticket is how a browser gets it.
+async fn viewing(state: &Shared, request: Request, query: &Query) -> Response {
+    let path = request.uri().path().to_owned();
+    if path == "/" {
+        if let Some(ticket) = query.get("ticket") {
+            return redeem(state, query, ticket);
+        }
+    }
+    if !state.has_view_key(query) {
+        return not_handed_over();
+    }
+    match path.as_str() {
+        "/events" => events(state, query),
+        "/image" => image(state, query).await,
+        _ => page(state, query).await,
+    }
+}
+
+fn not_handed_over() -> Response {
+    text(
+        StatusCode::FORBIDDEN,
+        "This preview has not been handed to this browser. Run 'blueline <file.md>' to open it.",
+    )
+}
+
+/// Spends a ticket and sends the browser on to the same URL with the view key
+/// in place of it, so that a reload or a bookmark never carries a spent
+/// ticket. A spent or unknown ticket gets nothing.
+fn redeem(state: &Shared, query: &Query, ticket: &str) -> Response {
+    if !state.redeem_ticket(ticket) {
+        return not_handed_over();
+    }
+    let location = query.replacing("ticket", "key", &state.view_key());
+    let mut headers = HeaderMap::new();
+    if let Ok(location) = HeaderValue::from_str(&location) {
+        headers.insert(header::LOCATION, location);
+    }
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    (StatusCode::SEE_OTHER, headers).into_response()
 }
 
 /// Whether the Host header names this server. A DNS rebinding attack resolves
@@ -545,17 +690,24 @@ fn host_allowed(request: &Request, port: u16) -> bool {
     [format!("127.0.0.1:{port}"), format!("localhost:{port}")].contains(&host.to_owned())
 }
 
-/// The routes only local tooling uses. A page in a browser attaches an Origin
-/// to every cross-origin POST, so its presence means the request came from
-/// somewhere else.
+/// The routes only the CLI uses, which need the token from this user's token
+/// file. A page in a browser attaches an Origin to every cross-origin POST, so
+/// its presence means the request came from somewhere else.
 async fn tooling(state: &Shared, request: Request, query: &Query) -> Response {
     if request.headers().contains_key(header::ORIGIN) {
         return text(StatusCode::FORBIDDEN, "forbidden");
     }
+    if !state.has_token(request.headers()) {
+        return text(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
     let path = request.uri().path().to_owned();
     match (path.as_str(), request.method()) {
         ("/open", &Method::POST) => open(state, request).await,
-        ("/shutdown", &Method::POST) => shutdown(),
+        ("/shutdown", &Method::POST) => shutdown(state),
+        ("/ticket", &Method::POST) => json_response(
+            StatusCode::OK,
+            json!({ "ok": true, "ticket": state.issue_ticket() }),
+        ),
         ("/viewers", _) => viewers(state, query),
         _ => text(StatusCode::NOT_FOUND, "not found"),
     }
@@ -595,25 +747,36 @@ fn path_json(path: Option<&Path>) -> serde_json::Value {
     })
 }
 
-/// `file` is what a bare `/` renders and `recent` the most recent `/open` of
-/// any kind. The rest lets the CLI recognise a server as one of its own.
-fn health(state: &Shared) -> Response {
-    let inner = state.lock();
+/// Says which program and version this is, so the CLI can tell blueline
+/// apart from whatever else might hold the port. With a challenge it also
+/// answers with a proof of knowing the token, which is how the CLI tells its
+/// own server from a process that took the port first.
+///
+/// `file` (what a bare `/` renders) and `recent` (the most recent `/open` of
+/// any kind) name the user's files, so only a request with the token gets them.
+fn health(state: &Shared, headers: &HeaderMap) -> Response {
     let exe = std::env::current_exe()
         .map(|exe| json!(exe.to_string_lossy()))
         .unwrap_or(serde_json::Value::Null);
-    json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "file": path_json(inner.last_opened.as_deref()),
-            "recent": path_json(inner.last_registered.as_deref()),
-            "server": "blueline",
-            "version": env!("CARGO_PKG_VERSION"),
-            "pid": std::process::id(),
-            "exe": exe,
-        }),
-    )
+    let mut body = json!({
+        "ok": true,
+        "server": "blueline",
+        "version": env!("CARGO_PKG_VERSION"),
+        "exe": exe,
+    });
+    let challenge = headers
+        .get(auth::CHALLENGE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|challenge| !challenge.is_empty() && challenge.len() <= 128);
+    if let Some(challenge) = challenge {
+        body["proof"] = json!(auth::proof(&state.lock().token, challenge));
+    }
+    if state.has_token(headers) {
+        let inner = state.lock();
+        body["file"] = path_json(inner.last_opened.as_deref());
+        body["recent"] = path_json(inner.last_registered.as_deref());
+    }
+    json_response(StatusCode::OK, body)
 }
 
 #[derive(Deserialize)]
@@ -663,8 +826,13 @@ async fn open(state: &Shared, request: Request) -> Response {
 
 /// Answers, then exits. A graceful shutdown would wait for the reload streams,
 /// which never end on their own.
-fn shutdown() -> Response {
+fn shutdown(state: &Shared) -> Response {
     eprintln!("blueline-server: shutting down on request");
+    let (port, token) = {
+        let inner = state.lock();
+        (inner.port, inner.token.clone())
+    };
+    auth::remove_token(port, &token);
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::process::exit(0);
@@ -758,7 +926,8 @@ async fn page(state: &Shared, query: &Query) -> Response {
         return text(StatusCode::NOT_FOUND, "not found");
     };
     let surface = Surface::parse(query.get("surface"));
-    let events = events_url(query.get("file"), surface);
+    let key = state.view_key();
+    let events = events_url(query.get("file"), surface, &key);
     let Some(file) = file else {
         let shell = Shell {
             nonce: &nonce,
@@ -795,7 +964,7 @@ async fn page(state: &Shared, query: &Query) -> Response {
     };
 
     let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut links = LinkRewriter::new(dir, surface);
+    let mut links = LinkRewriter::new(dir, surface, key);
     let rendered = render::render(&source, &mut |kind, url| links.rewrite(kind, url));
     {
         let mut inner = state.lock();
@@ -823,6 +992,12 @@ fn html_response(nonce: &str, body: String) -> Response {
     if let Ok(csp) = HeaderValue::from_str(&content_security_policy(nonce)) {
         headers.insert(header::CONTENT_SECURITY_POLICY, csp);
     }
+    // The page's URL carries the view key, and a link or a remote image must
+    // not take it along.
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     (headers, body).into_response()
 }
 
@@ -850,17 +1025,22 @@ fn content_security_policy(nonce: &str) -> String {
         "connect-src 'self'".to_owned(),
         "object-src 'none'".to_owned(),
         "base-uri 'none'".to_owned(),
+        // Nothing on the page posts a form, so a document cannot either.
+        "form-action 'none'".to_owned(),
+        // The preview is a top-level page; no other site may frame it.
+        "frame-ancestors 'none'".to_owned(),
     ]
     .join("; ")
 }
 
-/// The `/events` URL for a page, carrying its file and surface.
-fn events_url(file: Option<&str>, surface: Surface) -> String {
+/// The `/events` URL for a page, carrying its file, surface and view key.
+fn events_url(file: Option<&str>, surface: Surface, key: &str) -> String {
     let mut params = form_urlencoded::Serializer::new(String::new());
     if let Some(file) = file {
         params.append_pair("file", file);
     }
     params.append_pair("surface", surface.as_str());
+    params.append_pair("key", key);
     format!("/events?{}", params.finish())
 }
 
@@ -892,15 +1072,18 @@ fn render_toc(headings: &[render::Heading]) -> String {
 struct LinkRewriter {
     dir: PathBuf,
     surface: Surface,
+    /// The view key, which every URL to this server has to carry.
+    key: String,
     documents: Vec<PathBuf>,
     images: Vec<(PathBuf, &'static str)>,
 }
 
 impl LinkRewriter {
-    fn new(dir: PathBuf, surface: Surface) -> Self {
+    fn new(dir: PathBuf, surface: Surface, key: String) -> Self {
         LinkRewriter {
             dir,
             surface,
+            key,
             documents: Vec::new(),
             images: Vec::new(),
         }
@@ -925,6 +1108,7 @@ impl LinkRewriter {
         let params = form_urlencoded::Serializer::new(String::new())
             .append_pair("file", &file.to_string_lossy())
             .append_pair("surface", self.surface.as_str())
+            .append_pair("key", &self.key)
             .finish();
         self.documents.push(file);
         Some(format!("/?{params}{hash}"))
@@ -937,6 +1121,7 @@ impl LinkRewriter {
         let content_type = image_type(&file)?;
         let params = form_urlencoded::Serializer::new(String::new())
             .append_pair("file", &file.to_string_lossy())
+            .append_pair("key", &self.key)
             .finish();
         self.images.push((file, content_type));
         Some(format!("/image?{params}{hash}"))
@@ -1105,6 +1290,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn csp_blocks_forms_and_framing() {
+        let csp = content_security_policy("n0nce");
+        assert!(csp.contains("script-src 'nonce-n0nce'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+    }
+
+    #[test]
     fn resolve_is_lexical() {
         let base = Path::new("/home/me/docs");
         assert_eq!(
@@ -1150,13 +1344,13 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "x").unwrap();
         std::fs::write(root.join("data.bin"), "x").unwrap();
 
-        let mut links = LinkRewriter::new(root.clone(), Surface::Pane);
+        let mut links = LinkRewriter::new(root.clone(), Surface::Pane, "k".to_owned());
         let doc = root.join("other doc.md");
         let encoded: String =
             form_urlencoded::byte_serialize(doc.to_string_lossy().as_bytes()).collect();
         assert_eq!(
             links.rewrite(Reference::Link, "other%20doc.md#Part"),
-            Some(format!("/?file={encoded}&surface=pane#Part"))
+            Some(format!("/?file={encoded}&surface=pane&key=k#Part"))
         );
         assert_eq!(links.rewrite(Reference::Link, "notes.txt"), None);
         assert_eq!(links.rewrite(Reference::Link, "missing.md"), None);
@@ -1172,7 +1366,7 @@ mod tests {
             form_urlencoded::byte_serialize(pic.to_string_lossy().as_bytes()).collect();
         assert_eq!(
             links.rewrite(Reference::Image, "./pic.svg#view"),
-            Some(format!("/image?file={encoded}#view"))
+            Some(format!("/image?file={encoded}&key=k#view"))
         );
         assert_eq!(links.rewrite(Reference::Image, "data.bin"), None);
         assert_eq!(links.images, vec![(pic, "image/svg+xml")]);
@@ -1194,10 +1388,13 @@ mod tests {
     #[test]
     fn events_url_encodes_like_url_search_params() {
         assert_eq!(
-            events_url(Some("/a b/</script>&#.md"), Surface::Tab),
-            "/events?file=%2Fa+b%2F%3C%2Fscript%3E%26%23.md&surface=tab"
+            events_url(Some("/a b/</script>&#.md"), Surface::Tab, "k"),
+            "/events?file=%2Fa+b%2F%3C%2Fscript%3E%26%23.md&surface=tab&key=k"
         );
-        assert_eq!(events_url(None, Surface::Pane), "/events?surface=pane");
+        assert_eq!(
+            events_url(None, Surface::Pane, "k"),
+            "/events?surface=pane&key=k"
+        );
     }
 
     #[test]

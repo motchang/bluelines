@@ -1,0 +1,17 @@
+{
+  "name": "bluelines",
+  "description": "Claude Code plugins for blueline, a markdown previewer for terminal and agent workflows",
+  "owner": {
+    "name": "motchang",
+    "url": "https://github.com/motchang"
+  },
+  "plugins": [
+    {
+      "name": "blueline",
+      "source": "./plugins/blueline",
+      "description": "Preview markdown and mermaid with blueline, and inspect the rendered page from an agent",
+      "category": "productivity",
+      "tags": ["markdown", "mermaid", "preview"]
+    }
+  ]
+}

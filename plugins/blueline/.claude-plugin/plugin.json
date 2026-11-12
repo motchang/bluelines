@@ -1,0 +1,13 @@
+{
+  "name": "blueline",
+  "version": "0.2.0",
+  "description": "Preview markdown and mermaid with blueline, and inspect the rendered page from an agent",
+  "author": {
+    "name": "motchang",
+    "url": "https://github.com/motchang"
+  },
+  "homepage": "https://github.com/motchang/bluelines",
+  "repository": "https://github.com/motchang/bluelines",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["markdown", "mermaid", "preview", "herdr", "terminal-browser"]
+}

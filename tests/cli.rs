@@ -160,6 +160,8 @@ impl Env {
             )
             .env("BLUELINE_PORT", self.port.to_string())
             .env("TMPDIR", self.dir.path())
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("XDG_STATE_HOME", self.dir.path())
             .env("FAKE_DIR", self.dir.path())
             .env_remove("HERDR_TAB_ID")
             .env_remove("HERDR_PANE_ID");
@@ -191,11 +193,12 @@ impl Env {
         String::from_utf8_lossy(&out.stderr).into_owned()
     }
 
+    /// The URLs the opener was handed, without their tickets.
     fn opened(&self) -> Vec<String> {
         fs::read_to_string(self.path("opened"))
             .unwrap_or_default()
             .lines()
-            .map(str::to_owned)
+            .map(without_ticket)
             .collect()
     }
 
@@ -207,10 +210,12 @@ impl Env {
         let mut all: Vec<(String, String)> = entries
             .map(|e| {
                 let e = e.unwrap();
-                (
-                    e.file_name().to_string_lossy().into_owned(),
-                    fs::read_to_string(e.path()).unwrap(),
-                )
+                let tabs: String = fs::read_to_string(e.path())
+                    .unwrap()
+                    .lines()
+                    .map(|line| format!("{}\n", without_ticket(line)))
+                    .collect();
+                (e.file_name().to_string_lossy().into_owned(), tabs)
             })
             .collect();
         all.sort();
@@ -233,6 +238,20 @@ impl Env {
             "http://127.0.0.1:{}/?file={encoded}&surface={surface}",
             self.port
         )
+    }
+}
+
+/// A preview URL less its single-use ticket, which is different every run.
+/// Every ticket is the last parameter and 64 hex digits long.
+fn without_ticket(line: &str) -> String {
+    match line.find("&ticket=") {
+        Some(at) => {
+            let ticket = &line[at + "&ticket=".len()..];
+            assert_eq!(ticket.len(), 64, "{line}");
+            assert!(ticket.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
+            line[..at].to_owned()
+        }
+        None => line.to_owned(),
     }
 }
 
@@ -406,4 +425,86 @@ fn pane_modes_need_a_preview() {
         err.contains("no pane preview in this tab to reset"),
         "{err}"
     );
+}
+
+/// A process that took the port first and says it is blueline, as issue #33
+/// describes: its /health names a pid of someone else's, and it refuses
+/// /shutdown. Records the paths of every request it gets.
+fn impostor(listener: TcpListener, health: String) -> std::sync::mpsc::Receiver<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let (seen, requests) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut first = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            reader.read_line(&mut first).unwrap_or_default();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let _ = seen.send(first.trim().to_owned());
+            let reply = if first.starts_with("GET /health") {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{health}",
+                    health.len()
+                )
+            } else {
+                "HTTP/1.1 500 Nope\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned()
+            };
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    requests
+}
+
+#[test]
+fn an_impostor_on_the_port_gets_no_signal_and_no_paths() {
+    let env = Env::new(false);
+    let listener = TcpListener::bind(("127.0.0.1", env.port)).unwrap();
+    let mut victim = Command::new("sleep").arg("30").spawn().unwrap();
+    let health = serde_json::json!({
+        "ok": true, "server": "blueline", "version": "9.9.9",
+        "pid": victim.id(), "exe": "/nope", "proof": "00",
+    })
+    .to_string();
+    let requests = impostor(listener, health);
+
+    let err = env.fails(&["--stop"]);
+    assert!(err.contains("would not stop"), "{err}");
+    let file = env.markdown("secret plans.md");
+    let err = env.fails(&[file.to_str().unwrap()]);
+    assert!(err.contains("would not stop"), "{err}");
+
+    assert!(
+        victim.try_wait().unwrap().is_none(),
+        "the pid the impostor named was signalled"
+    );
+    let _ = victim.kill();
+    let _ = victim.wait();
+    let seen: Vec<String> = requests.try_iter().collect();
+    assert!(
+        seen.iter()
+            .all(|r| r.starts_with("GET /health ") || r.starts_with("POST /shutdown ")),
+        "{seen:?}"
+    );
+    assert!(env.opened().is_empty());
+}
+
+#[test]
+fn something_that_is_not_blueline_is_sent_nothing() {
+    let env = Env::new(false);
+    let listener = TcpListener::bind(("127.0.0.1", env.port)).unwrap();
+    let requests = impostor(listener, "<html>hello</html>".to_owned());
+    let file = env.markdown("a.md");
+    let err = env.fails(&[file.to_str().unwrap()]);
+    assert!(err.contains("does not say it is blueline"), "{err}");
+    let seen: Vec<String> = requests.try_iter().collect();
+    assert!(
+        seen.iter().all(|r| r.starts_with("GET /health ")),
+        "{seen:?}"
+    );
+    assert!(env.opened().is_empty());
 }
