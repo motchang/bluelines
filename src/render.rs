@@ -81,20 +81,13 @@ pub fn render(
 
     // Links first, so that a link inside a heading is already rewritten when
     // the heading is rendered on its own below.
-    // Raw HTML is filtered in the same pass, for the same reason.
+    // Raw HTML is filtered before then too, for the same reason.
     for node in &nodes {
+        filter_raw_html(node);
         let mut ast = node.data_mut();
         let (kind, link) = match ast.value {
             NodeValue::Link(ref mut link) => (Reference::Link, link),
             NodeValue::Image(ref mut link) => (Reference::Image, link),
-            NodeValue::HtmlBlock(ref mut block) => {
-                block.literal = filter_tags(&block.literal);
-                continue;
-            }
-            NodeValue::HtmlInline(ref mut literal) => {
-                *literal = filter_tags(literal);
-                continue;
-            }
             _ => continue,
         };
         if let Some(url) = rewrite(kind, &link.url) {
@@ -191,6 +184,15 @@ const FILTERED_TAGS: [&str; 12] = [
     "base",
     "link",
 ];
+
+/// Applies [`filter_tags`] to a raw HTML node; other nodes are left alone.
+fn filter_raw_html<'a>(node: &'a AstNode<'a>) {
+    match node.data_mut().value {
+        NodeValue::HtmlBlock(ref mut block) => block.literal = filter_tags(&block.literal),
+        NodeValue::HtmlInline(ref mut literal) => *literal = filter_tags(literal),
+        _ => {}
+    }
+}
 
 /// Neutralises every opening or closing tag in [`FILTERED_TAGS`] by escaping
 /// its `<`, the way GFM's tagfilter extension does, so the tag shows as text.

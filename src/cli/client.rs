@@ -449,30 +449,7 @@ fn open_log(path: &Path) -> io::Result<File> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("the log path has no directory"))?;
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    match DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let meta = std::fs::symlink_metadata(dir)?;
-    if !meta.file_type().is_dir() {
-        return Err(io::Error::other(format!(
-            "{} is not a directory",
-            dir.display()
-        )));
-    }
-    if meta.uid() != uid {
-        return Err(io::Error::other(format!(
-            "{} belongs to another user",
-            dir.display()
-        )));
-    }
-    if meta.mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, Permissions::from_mode(0o700))?;
-    }
+    private_dir(dir, uid)?;
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -481,11 +458,33 @@ fn open_log(path: &Path) -> io::Result<File> {
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() || meta.uid() != uid {
-        return Err(io::Error::other(
-            "not a regular file of this user's".to_owned(),
-        ));
+        return Err(io::Error::other("not a regular file of this user's"));
     }
     Ok(file)
+}
+
+/// Makes sure `dir` is a real directory that `uid` owns and only it can use,
+/// creating it 0700 if it is missing and tightening it if it is ours.
+fn private_dir(dir: &Path, uid: u32) -> io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(error) = DirBuilder::new().mode(0o700).create(dir) {
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() || meta.uid() != uid {
+        return Err(io::Error::other(format!(
+            "{} is not a directory of this user's",
+            dir.display()
+        )));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
