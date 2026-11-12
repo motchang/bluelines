@@ -1,5 +1,6 @@
 //! Integration tests for the render server: each test starts `blueline serve`
-//! on a free port and talks to it over plain HTTP.
+//! on a free port and talks to it over plain HTTP, with the token from the
+//! token file and the cookie a ticket gets, the way the CLI and a browser do.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -18,13 +19,20 @@ const QUIET_WAIT: Duration = Duration::from_millis(1500);
 struct Server {
     child: Child,
     port: u16,
+    /// The server's TMPDIR, which its token file goes under.
+    state: tempfile::TempDir,
+    token: String,
+    cookie: String,
 }
 
 impl Server {
     fn start() -> Self {
+        let state = tempfile::tempdir().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_blueline"))
             .args(["serve", "--port", "0"])
             .env_remove("BLUELINE_PORT")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("TMPDIR", state.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -40,7 +48,43 @@ impl Server {
             .next()
             .and_then(|port| port.parse().ok())
             .unwrap_or_else(|| panic!("unexpected first line: {line:?}"));
-        Server { child, port }
+        let mut server = Server {
+            child,
+            port,
+            state,
+            token: String::new(),
+            cookie: String::new(),
+        };
+        server.token = std::fs::read_to_string(server.token_path()).expect("a token file");
+        let ticket = server.ticket();
+        let redeemed = server.anonymous("GET", &format!("/?ticket={ticket}"), &[], None);
+        assert_eq!(redeemed.status, 303);
+        server.cookie = redeemed
+            .header("set-cookie")
+            .and_then(|c| c.split(';').next())
+            .expect("a cookie")
+            .to_owned();
+        server
+    }
+
+    /// The token file, in the one `blueline-<uid>` directory under TMPDIR.
+    fn token_path(&self) -> PathBuf {
+        let dir = std::fs::read_dir(self.state.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("blueline-")
+            })
+            .expect("a state directory");
+        dir.join(format!("server-{}.token", self.port))
+    }
+
+    fn ticket(&self) -> String {
+        let reply = self.request("POST", "/ticket", &[], None);
+        reply.json()["ticket"].as_str().unwrap().to_owned()
     }
 
     fn host(&self) -> String {
@@ -64,7 +108,26 @@ impl Server {
         )
     }
 
+    /// A request with the token and the cookie, as the CLI and a browser it
+    /// handed a page to would send.
     fn request(
+        &self,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Reply {
+        let bearer = format!("Bearer {}", self.token);
+        let mut all = vec![
+            ("authorization", bearer.as_str()),
+            ("cookie", self.cookie.as_str()),
+        ];
+        all.extend_from_slice(headers);
+        self.anonymous(method, target, &all, body)
+    }
+
+    /// A request with neither, as any other local process could send.
+    fn anonymous(
         &self,
         method: &str,
         target: &str,
@@ -83,8 +146,9 @@ impl Server {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         write!(
             stream,
-            "GET {target} HTTP/1.1\r\nhost: {}\r\naccept: text/event-stream\r\n\r\n",
-            self.host()
+            "GET {target} HTTP/1.1\r\nhost: {}\r\ncookie: {}\r\naccept: text/event-stream\r\n\r\n",
+            self.host(),
+            self.cookie
         )
         .unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -120,10 +184,7 @@ impl Drop for Server {
     /// does not go.
     fn drop(&mut self) {
         if let Ok(None) = self.child.try_wait() {
-            let host = self.host();
-            let _ = std::panic::catch_unwind(|| {
-                request(self.port, "POST", "/shutdown", &[("host", &host)], None)
-            });
+            let _ = std::panic::catch_unwind(|| self.request("POST", "/shutdown", &[], None));
             let deadline = Instant::now() + Duration::from_secs(5);
             while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(20));
@@ -246,7 +307,7 @@ fn health_reports_the_server_and_its_files() {
     assert_eq!(health["ok"], true);
     assert_eq!(health["server"], "blueline");
     assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(health["pid"], server.child.id());
+    assert!(health["pid"].is_null(), "a pid is not something to act on");
     assert!(health["exe"].is_string());
     assert!(health["file"].is_null());
     assert!(health["recent"].is_null());
@@ -261,6 +322,136 @@ fn health_reports_the_server_and_its_files() {
     let health = server.get("/health").json();
     assert_eq!(health["file"], pane.to_str().unwrap());
     assert_eq!(health["recent"], tab.to_str().unwrap());
+
+    // The paths are the user's, and only the token gets them.
+    let health = server.anonymous("GET", "/health", &[], None).json();
+    assert_eq!(health["server"], "blueline");
+    assert!(health.get("file").is_none());
+    assert!(health.get("recent").is_none());
+}
+
+#[test]
+fn health_proves_it_knows_the_token() {
+    use hmac::{Hmac, KeyInit, Mac};
+    let server = Server::start();
+    let challenge = "0123abcd";
+    let health = server
+        .anonymous(
+            "GET",
+            "/health",
+            &[("x-blueline-challenge", challenge)],
+            None,
+        )
+        .json();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(server.token.as_bytes()).unwrap();
+    mac.update(b"blueline health v1\n");
+    mac.update(challenge.as_bytes());
+    let expected: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(health["proof"], expected);
+
+    let health = server.anonymous("GET", "/health", &[], None).json();
+    assert!(health.get("proof").is_none());
+}
+
+#[test]
+fn the_token_file_is_private_and_goes_with_the_server() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start();
+    let path = server.token_path();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+    assert_eq!(server.token.len(), 64);
+    drop(server);
+    assert!(!path.exists(), "a stopped server leaves no token behind");
+}
+
+#[test]
+fn other_local_processes_get_nothing() {
+    let server = Server::start();
+    let (_dir, root) = workdir();
+    let doc = root.join("doc.md");
+    write(&doc, "# private");
+    let open = serde_json::json!({ "path": doc }).to_string();
+
+    // No token, or the wrong one: the tooling routes refuse outright.
+    for headers in [vec![], vec![("authorization", "Bearer 00")]] {
+        for (method, target, body) in [
+            ("POST", "/open", Some(open.as_str())),
+            ("POST", "/shutdown", None),
+            ("POST", "/ticket", None),
+            ("GET", "/viewers", None),
+        ] {
+            let reply = server.anonymous(method, target, &headers, body);
+            assert_eq!(reply.status, 401, "{target} with {headers:?}");
+        }
+    }
+
+    // No cookie: not even a registered file is shown.
+    assert_eq!(server.open(&doc, Some(false)).status, 200);
+    for target in [
+        format!("/?file={}", query(&doc)),
+        format!("/events?file={}", query(&doc)),
+        format!("/image?file={}", query(&doc)),
+        "/".to_owned(),
+    ] {
+        let reply = server.anonymous("GET", &target, &[], None);
+        assert_eq!(reply.status, 403, "{target}");
+        assert!(!reply.body.contains("private"), "{target}");
+    }
+    let forged = format!("blueline-{}=00", server.port);
+    let reply = server.anonymous("GET", "/", &[("cookie", &forged)], None);
+    assert_eq!(reply.status, 403);
+    // The assets hold nothing of the user's.
+    let reply = server.anonymous("GET", "/assets/highlight.js", &[], None);
+    assert_eq!(reply.status, 200);
+}
+
+#[test]
+fn a_ticket_is_good_once() {
+    let server = Server::start();
+    let (_dir, root) = workdir();
+    let doc = root.join("a b.md");
+    write(&doc, "# doc");
+    server.open(&doc, Some(false));
+
+    let ticket = server.ticket();
+    let target = format!("/?file={}&surface=pane&ticket={ticket}", query(&doc));
+    let first = server.anonymous("GET", &target, &[], None);
+    assert_eq!(first.status, 303);
+    assert_eq!(
+        first.header("location"),
+        Some(format!("/?file={}&surface=pane", query(&doc)).as_str())
+    );
+    let cookie = first.header("set-cookie").unwrap();
+    assert!(cookie.starts_with(&format!("blueline-{}=", server.port)));
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    let cookie = cookie.split(';').next().unwrap().to_owned();
+    let page = server.anonymous(
+        "GET",
+        first.header("location").unwrap(),
+        &[("cookie", &cookie)],
+        None,
+    );
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("<title>a b.md</title>"));
+
+    // Spent: a second browser gets nothing for it, while one that already has
+    // the cookie is just sent on.
+    let again = server.anonymous("GET", &target, &[], None);
+    assert_eq!(again.status, 403);
+    assert!(again.header("set-cookie").is_none());
+    let again = server.anonymous("GET", &target, &[("cookie", &cookie)], None);
+    assert_eq!(again.status, 303);
+    assert!(again.header("set-cookie").is_none());
+
+    let reply = server.anonymous("GET", "/?ticket=nope", &[], None);
+    assert_eq!(reply.status, 403);
 }
 
 #[test]
@@ -610,6 +801,8 @@ fn shutdown_stops_the_server() {
     let mut server = Server::start();
     let reply = server.request("POST", "/shutdown", &[("origin", "http://x")], None);
     assert_eq!(reply.status, 403);
+    let reply = server.anonymous("POST", "/shutdown", &[], None);
+    assert_eq!(reply.status, 401);
     let reply = server.request("POST", "/shutdown", &[], None);
     assert_eq!(reply.json(), serde_json::json!({ "ok": true }));
     let deadline = Instant::now() + Duration::from_secs(5);

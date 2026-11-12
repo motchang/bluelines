@@ -3,10 +3,13 @@
 //! starting, stopping or replacing it.
 //!
 //! Which server holds the port is answered by the server itself: `/health`
-//! names the program, its version, its pid and the executable it runs from.
-//! That replaces the `lsof` / `ps` / `curl` / `jq` pipeline of the sh version,
-//! and with it the dependency on all four being installed.
+//! names the program, its version and the executable it runs from, and proves
+//! it knows the token in this user's token file (see `auth`). Only a server
+//! that has proved that is sent the token, a file path, or anything else of
+//! the user's. Nothing is ever signalled: a pid is only a claim, and the
+//! process making it may not be the one it names.
 
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -17,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::Failure;
+use crate::auth;
 
 /// What `/health` says about the server that answered it.
 #[derive(Debug, Default)]
@@ -32,8 +36,8 @@ pub struct Health {
 #[derive(Debug, PartialEq, Eq)]
 struct Identity {
     version: String,
-    pid: Option<u32>,
     exe: Option<String>,
+    proof: Option<String>,
 }
 
 /// Who holds the port, as far as `/health` can tell.
@@ -41,13 +45,19 @@ struct Identity {
 pub enum Holder {
     /// Nothing answered.
     Nobody,
-    /// This very binary, at this version.
+    /// This very binary, at this version, knowing this user's token.
     Ours,
-    /// Another blueline: another version, or another copy of the binary. It
-    /// renders with code this one does not have, so it is retired.
-    OtherBlueline { pid: Option<u32> },
-    /// Something answered that does not say it is blueline - an older
-    /// blueline-server, or another program. Neither is ours to kill.
+    /// Another blueline that knows this user's token: another version, or
+    /// another copy of the binary. It renders with code this one does not
+    /// have, so it is retired.
+    OtherBlueline,
+    /// Something that says it is blueline but cannot prove it knows the
+    /// token: a blueline that keeps its token somewhere else (another
+    /// `XDG_RUNTIME_DIR` or `TMPDIR`), one from before tokens, or a process
+    /// that took the port to pass itself off as one. It is asked to stop, and
+    /// told nothing else.
+    Unverified,
+    /// Something answered that does not say it is blueline.
     Unknown,
 }
 
@@ -72,11 +82,8 @@ impl Health {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                pid: map
-                    .get("pid")
-                    .and_then(Value::as_u64)
-                    .and_then(|p| u32::try_from(p).ok()),
                 exe: non_empty_string(map.get("exe")),
+                proof: non_empty_string(map.get("proof")),
             });
         Health {
             file: non_empty_string(map.get("file")),
@@ -91,10 +98,19 @@ impl Health {
         self.recent.as_deref().or(self.file.as_deref())
     }
 
-    fn holder(&self, own_exe: Option<&Path>) -> Holder {
+    /// Who answered, given the challenge it was sent and the token it should
+    /// know.
+    fn holder(&self, own_exe: Option<&Path>, token: Option<&str>, challenge: &str) -> Holder {
         let Some(identity) = &self.identity else {
             return Holder::Unknown;
         };
+        let proved = match (token, &identity.proof) {
+            (Some(token), Some(proof)) => auth::proof_holds(token, challenge, proof),
+            _ => false,
+        };
+        if !proved {
+            return Holder::Unverified;
+        }
         let same_exe = match (&identity.exe, own_exe) {
             (Some(theirs), Some(ours)) => same_file(Path::new(theirs), ours),
             _ => false,
@@ -102,7 +118,7 @@ impl Health {
         if same_exe && identity.version == env!("CARGO_PKG_VERSION") {
             Holder::Ours
         } else {
-            Holder::OtherBlueline { pid: identity.pid }
+            Holder::OtherBlueline
         }
     }
 }
@@ -123,10 +139,19 @@ struct Reply {
     body: String,
 }
 
+impl Reply {
+    fn success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
 /// The render server on one loopback port.
 pub struct Server {
     pub port: u16,
     pub base: String,
+    /// The token, once the server on the port has proved it knows it. Until
+    /// then nothing that needs it is sent.
+    trusted: RefCell<Option<String>>,
 }
 
 impl Server {
@@ -134,6 +159,7 @@ impl Server {
         Server {
             port,
             base: format!("http://127.0.0.1:{port}"),
+            trusted: RefCell::new(None),
         }
     }
 
@@ -150,40 +176,87 @@ impl Server {
             .into()
     }
 
+    /// The Authorization header for a server that has proved itself.
+    fn bearer(&self) -> Option<String> {
+        self.trusted
+            .borrow()
+            .as_ref()
+            .map(|token| format!("Bearer {token}"))
+    }
+
     fn get(&self, path: &str, timeout: Duration) -> Option<Reply> {
-        let mut response = Self::agent(timeout)
-            .get(format!("{}{path}", self.base))
-            .call()
-            .ok()?;
+        self.get_with(path, &[], timeout)
+    }
+
+    fn get_with(&self, path: &str, headers: &[(&str, &str)], timeout: Duration) -> Option<Reply> {
+        let mut request = Self::agent(timeout).get(format!("{}{path}", self.base));
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(bearer) = self.bearer() {
+            request = request.header("authorization", bearer);
+        }
+        let mut response = request.call().ok()?;
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().ok()?;
         Some(Reply { status, body })
     }
 
     fn post(&self, path: &str, body: &str, timeout: Duration) -> Option<Reply> {
-        let mut response = Self::agent(timeout)
+        let mut request = Self::agent(timeout)
             .post(format!("{}{path}", self.base))
-            .header("content-type", "application/json")
-            .send(body)
-            .ok()?;
+            .header("content-type", "application/json");
+        if let Some(bearer) = self.bearer() {
+            request = request.header("authorization", bearer);
+        }
+        let mut response = request.send(body).ok()?;
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string().ok()?;
         Some(Reply { status, body })
     }
 
-    /// `/health`, or None when nothing answered with a success.
-    pub fn health(&self, timeout: Duration) -> Option<Health> {
-        let reply = self.get("/health", timeout)?;
-        (200..300)
-            .contains(&reply.status)
-            .then(|| Health::parse(&reply.body))
+    /// Whether anything answers `/health` with a success.
+    fn answers(&self, timeout: Duration) -> bool {
+        self.get("/health", timeout).is_some_and(|r| r.success())
     }
 
+    /// Who holds the port, sending it a fresh challenge. A server that answers
+    /// it is trusted with the token from here on; any other is not, whatever
+    /// was trusted before.
     pub fn holder(&self) -> Holder {
-        match self.health(Duration::from_secs(1)) {
-            None => Holder::Nobody,
-            Some(health) => health.holder(std::env::current_exe().ok().as_deref()),
+        self.trusted.replace(None);
+        let challenge = auth::random_hex(16);
+        let Some(reply) = self.get_with(
+            "/health",
+            &[(auth::CHALLENGE_HEADER, &challenge)],
+            Duration::from_secs(1),
+        ) else {
+            return Holder::Nobody;
+        };
+        if !reply.success() {
+            return Holder::Nobody;
         }
+        let token = auth::read_token(self.port);
+        let own_exe = std::env::current_exe().ok();
+        let holder =
+            Health::parse(&reply.body).holder(own_exe.as_deref(), token.as_deref(), &challenge);
+        if matches!(holder, Holder::Ours | Holder::OtherBlueline) {
+            self.trusted.replace(token);
+        }
+        holder
+    }
+
+    /// The files `/health` reports, from a server that has proved itself, or
+    /// none: the paths are the user's, and an unproved server would be making
+    /// them up.
+    pub fn files(&self) -> Health {
+        if self.trusted.borrow().is_none() {
+            return Health::default();
+        }
+        self.get("/health", Duration::from_secs(2))
+            .filter(Reply::success)
+            .map(|reply| Health::parse(&reply.body))
+            .unwrap_or_default()
     }
 
     /// The log a server started from here writes to.
@@ -203,20 +276,14 @@ impl Server {
         match self.holder() {
             Holder::Ours => return Ok(()),
             Holder::Nobody => {}
-            Holder::OtherBlueline { pid } => {
-                self.retire(pid)?;
-            }
+            Holder::OtherBlueline | Holder::Unverified => self.retire()?,
             Holder::Unknown => {
-                // Not ours to kill, and refusing would trade a check that only
-                // matters when something else is already here for a preview
-                // that never works at all. What must not be skipped is saying
-                // so, because the failure it leaves open - rendering through
-                // other code - shows up as nothing more than a stale page.
-                eprintln!(
-                    "blueline: the server already on {} does not say it is blueline (an older blueline-server, or another program) - if the preview renders stale, stop that process by hand",
+                // Not ours to stop, and not to be handed the user's file paths
+                // either: it may be there to collect them.
+                return Err(Failure::new(format!(
+                    "something on port {} answers but does not say it is blueline - not sending it anything; stop that process, or set BLUELINE_PORT to another port",
                     self.port
-                );
-                return Ok(());
+                )));
             }
         }
         self.start()
@@ -252,8 +319,8 @@ impl Server {
             .map_err(|_| not_started())?;
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if self.health(Duration::from_secs(1)).is_some() {
-                return Ok(());
+            if self.answers(Duration::from_secs(1)) {
+                break;
             }
             // A server that has already exited - the port taken by something
             // that does not speak HTTP, say - will not come up by waiting.
@@ -262,31 +329,37 @@ impl Server {
             }
             sleep(Duration::from_millis(100));
         }
-        // Another run may have started the server while this one's copy lost
-        // the race for the port; a server that answers is the one wanted.
-        if self.health(Duration::from_secs(1)).is_some() {
-            return Ok(());
+        // Whatever answers now has to prove it is the server just started -
+        // or one another run started a moment earlier, which is as good - and
+        // not something that took the port while this one was starting.
+        match self.holder() {
+            Holder::Ours => Ok(()),
+            Holder::Nobody => Err(not_started()),
+            _ => Err(Failure::new(format!(
+                "the server that answers on {} is not the one blueline just started and cannot prove it is yours - stop it, or set BLUELINE_PORT to another port",
+                self.base
+            ))),
         }
-        Err(not_started())
     }
 
-    /// Stops another blueline on the port and waits for the port to come free,
-    /// which it has to before a replacement can bind it.
-    fn retire(&self, pid: Option<u32>) -> Result<(), Failure> {
+    /// Asks the server on the port to stop and waits for the port to come
+    /// free, which it has to before a replacement can bind it. The token goes
+    /// only to a server that has proved itself; one that has not is asked
+    /// without it, which a blueline from before tokens still honours.
+    fn retire(&self) -> Result<(), Failure> {
         let asked = self
             .post("/shutdown", "{}", Duration::from_secs(2))
-            .is_some_and(|r| (200..300).contains(&r.status));
-        if let (false, Some(pid)) = (asked, pid) {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            .is_some_and(|r| r.success());
+        self.trusted.replace(None);
+        if !asked {
+            return Err(Failure::new(format!(
+                "the server on port {} would not stop - it may be a blueline that keeps its token somewhere else (another XDG_RUNTIME_DIR or TMPDIR), or a process passing itself off as one; stop it by hand, or set BLUELINE_PORT to another port",
+                self.port
+            )));
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if self.health(Duration::from_millis(500)).is_none() {
+            if !self.answers(Duration::from_millis(500)) {
                 return Ok(());
             }
             sleep(Duration::from_millis(200));
@@ -301,8 +374,9 @@ impl Server {
     pub fn stop(&self) -> Result<bool, Failure> {
         match self.holder() {
             Holder::Nobody => Ok(false),
-            Holder::Ours => self.retire(None).map(|()| true),
-            Holder::OtherBlueline { pid } => self.retire(pid).map(|()| true),
+            Holder::Ours | Holder::OtherBlueline | Holder::Unverified => {
+                self.retire().map(|()| true)
+            }
             Holder::Unknown => Err(Failure::new(format!(
                 "something on {} answers but does not say it is blueline - not stopping it; stop that process by hand",
                 self.port
@@ -310,10 +384,21 @@ impl Server {
         }
     }
 
+    /// The refusal for a call that needs a server that has proved itself.
+    fn unproved(&self) -> Failure {
+        Failure::new(format!(
+            "the render server on {} has not proved it is yours - not sending it anything",
+            self.port
+        ))
+    }
+
     /// Registers a file with the server, which is also what reloads a page
     /// already showing it. `current: false` registers it without making it the
     /// file a bare `/` follows - see the browser path for why.
     pub fn open(&self, file: &Path, current: bool) -> Result<(), Failure> {
+        if self.trusted.borrow().is_none() {
+            return Err(self.unproved());
+        }
         let body = serde_json::json!({
             "path": file.to_string_lossy(),
             "current": current,
@@ -340,23 +425,46 @@ impl Server {
     /// How many browser tabs have this file open, or 0 when that cannot be
     /// told - a silence has to read as "no tabs" so that the preview happens.
     pub fn tab_viewers(&self, file: &Path) -> u64 {
+        if self.trusted.borrow().is_none() {
+            return 0;
+        }
         let path = format!("/viewers?file={}", uri_encode(&file.to_string_lossy()));
         self.get(&path, Duration::from_secs(2))
-            .filter(|r| (200..300).contains(&r.status))
+            .filter(Reply::success)
             .and_then(|r| serde_json::from_str::<Value>(&r.body).ok())
             .and_then(|v| v.get("count").and_then(Value::as_u64))
             .unwrap_or(0)
     }
 
+    /// A single-use ticket that lets one browser read pages.
+    fn ticket(&self) -> Result<String, Failure> {
+        if self.trusted.borrow().is_none() {
+            return Err(self.unproved());
+        }
+        self.post("/ticket", "{}", Duration::from_secs(2))
+            .filter(Reply::success)
+            .and_then(|r| serde_json::from_str::<Value>(&r.body).ok())
+            .and_then(|v| non_empty_string(v.get("ticket")))
+            .ok_or_else(|| {
+                Failure::new(format!(
+                    "the render server on {} gave no ticket for a preview",
+                    self.port
+                ))
+            })
+    }
+
     /// The URL of one preview surface, `pane` or `tab`, with the file in the
     /// query rather than left to whatever the server thinks is current. That is
-    /// what lets several previews show different files at once.
-    pub fn preview_url(&self, file: &Path, surface: &str) -> String {
-        format!(
-            "{}/?file={}&surface={surface}",
+    /// what lets several previews show different files at once. Each URL
+    /// carries a fresh ticket, which the server swaps for a cookie and drops
+    /// from the address on the first visit.
+    pub fn preview_url(&self, file: &Path, surface: &str) -> Result<String, Failure> {
+        Ok(format!(
+            "{}/?file={}&surface={surface}&ticket={}",
             self.base,
-            uri_encode(&file.to_string_lossy())
-        )
+            uri_encode(&file.to_string_lossy()),
+            self.ticket()?
+        ))
     }
 }
 
@@ -418,12 +526,12 @@ mod tests {
     }
 
     #[test]
-    fn preview_url_carries_file_and_surface() {
-        let server = Server::new(43128);
-        assert_eq!(
-            server.preview_url(Path::new("/tmp/a b.md"), "pane"),
-            "http://127.0.0.1:43128/?file=%2Ftmp%2Fa%20b.md&surface=pane"
-        );
+    fn nothing_is_sent_to_an_unproved_server() {
+        let server = Server::new(9);
+        assert!(server.preview_url(Path::new("/a.md"), "pane").is_err());
+        assert!(server.open(Path::new("/a.md"), true).is_err());
+        assert_eq!(server.tab_viewers(Path::new("/a.md")), 0);
+        assert!(server.files().file.is_none());
     }
 
     #[test]
@@ -431,37 +539,47 @@ mod tests {
         let h = Health::parse(r#"{"ok":true,"file":"/a.md","recent":null}"#);
         assert_eq!(h.file.as_deref(), Some("/a.md"));
         assert_eq!(h.recent_or_current(), Some("/a.md"));
-        assert_eq!(h.holder(None), Holder::Unknown);
+        assert_eq!(h.holder(None, None, "c"), Holder::Unknown);
 
         let h = Health::parse("<html>");
         assert!(h.file.is_none());
-        assert_eq!(h.holder(None), Holder::Unknown);
+        assert_eq!(h.holder(None, None, "c"), Holder::Unknown);
     }
 
     #[test]
-    fn holder_compares_exe_and_version() {
+    fn holder_needs_proof_then_compares_exe_and_version() {
         let exe = std::env::current_exe().unwrap();
-        let body = |version: &str, exe: &str| {
+        let token = auth::new_token();
+        let challenge = auth::random_hex(16);
+        let body = |version: &str, exe: &str, proof: &str| {
             serde_json::json!({
                 "ok": true, "server": "blueline", "version": version,
-                "pid": 42, "exe": exe,
+                "exe": exe, "proof": proof,
             })
             .to_string()
         };
-        let ours = Health::parse(&body(env!("CARGO_PKG_VERSION"), &exe.to_string_lossy()));
-        assert_eq!(ours.holder(Some(&exe)), Holder::Ours);
+        let proof = auth::proof(&token, &challenge);
+        let own = exe.to_string_lossy();
+        let holder = |body: &str, token: Option<&str>| {
+            Health::parse(body).holder(Some(&exe), token, &challenge)
+        };
 
-        let older = Health::parse(&body("0.0.0-old", &exe.to_string_lossy()));
-        assert_eq!(
-            older.holder(Some(&exe)),
-            Holder::OtherBlueline { pid: Some(42) }
-        );
+        let ours = body(env!("CARGO_PKG_VERSION"), &own, &proof);
+        assert_eq!(holder(&ours, Some(&token)), Holder::Ours);
+        // The same answer means nothing without the token to check it by, or
+        // checked by another token.
+        assert_eq!(holder(&ours, None), Holder::Unverified);
+        assert_eq!(holder(&ours, Some(&auth::new_token())), Holder::Unverified);
+        // A proof for another challenge is a replay.
+        let replayed = body(env!("CARGO_PKG_VERSION"), &own, &auth::proof(&token, "old"));
+        assert_eq!(holder(&replayed, Some(&token)), Holder::Unverified);
+        let unproved = body(env!("CARGO_PKG_VERSION"), &own, "");
+        assert_eq!(holder(&unproved, Some(&token)), Holder::Unverified);
 
-        let elsewhere = Health::parse(&body(env!("CARGO_PKG_VERSION"), "/elsewhere/blueline"));
-        assert_eq!(
-            elsewhere.holder(Some(&exe)),
-            Holder::OtherBlueline { pid: Some(42) }
-        );
+        let older = body("0.0.0-old", &own, &proof);
+        assert_eq!(holder(&older, Some(&token)), Holder::OtherBlueline);
+        let elsewhere = body(env!("CARGO_PKG_VERSION"), "/elsewhere/blueline", &proof);
+        assert_eq!(holder(&elsewhere, Some(&token)), Holder::OtherBlueline);
     }
 
     #[test]
