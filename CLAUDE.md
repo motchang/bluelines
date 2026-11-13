@@ -1,15 +1,15 @@
 # CLAUDE.md
 
-## Merging pull requests
+## プルリクエストのマージ
 
-This repo is also reviewed by Codex (`chatgpt-codex-connector[bot]`). Never merge a
-pull request until Codex has finished reviewing its current head commit:
+このリポジトリは Codex (`chatgpt-codex-connector[bot]`) によるレビューも受けています。
+Codex が現在の head コミットのレビューを終えるまで、プルリクエストを絶対にマージしないでください。
 
-- Codex keeps a summary comment on the PR (`<!-- codex-pull-request-review-summary -->`).
-  Its `codex-review-state:v1` JSON must show `code_review.status` = `completed`,
-  `code_review.commit_sha` matching the PR's current head, and
-  `has_unresolved_findings` = `false`.
-- Codex does not re-review on push. If the head has moved since its last review,
-  comment `@codex review` on the PR and wait for the new result.
-- Codex never approves. A 👍 reaction from it on the PR means it found nothing.
-- Address or reply to every Codex finding before merging.
+- Codex は PR 上にサマリーコメント (`<!-- codex-pull-request-review-summary -->`) を保持しています。
+  その `codex-review-state:v1` JSON が、`code_review.status` = `completed`、
+  `code_review.commit_sha` が PR の現在の head と一致、
+  `has_unresolved_findings` = `false` であることを確認してください。
+- Codex は push されても再レビューしません。前回のレビュー以降に head が動いている場合は、
+  PR に `@codex review` とコメントし、新しい結果を待ってください。
+- Codex は approve しません。PR に Codex から 👍 リアクションが付いていれば、指摘事項なしという意味です。
+- マージ前に、Codex のすべての指摘に対応するか返信してください。
