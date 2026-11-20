@@ -4,12 +4,16 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    assignees:
+      - "motchang"
     cooldown:
       default-days: 7
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "daily"
+    assignees:
+      - "motchang"
     cooldown:
       default-days: 7
     groups:
@@ -22,6 +26,8 @@ updates:
     directory: "/packaging/vendor"
     schedule:
       interval: "daily"
+    assignees:
+      - "motchang"
     cooldown:
       default-days: 7
     groups:
