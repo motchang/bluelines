@@ -8,6 +8,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 /// The browser opener: records the URL it was asked to open.
 const OPENER: &str = r#"#!/bin/sh
@@ -98,10 +99,55 @@ case $cmd in
 esac
 "#;
 
-/// A scratch directory with the stand-ins on PATH, and a free port for the
+/// The stand-ins, written once for the whole test binary: `none` holds
+/// nothing, `plain` the openers, `herdr` the openers plus herdr and
+/// terminal-browser. They keep their state under `$FAKE_DIR`, so every test
+/// can share them.
+///
+/// Writing them per test raced: while one test held a script open for
+/// writing, another test's fork could inherit that descriptor until its exec,
+/// and running the script then failed with ETXTBSY ("Text file busy"). Every
+/// test calls `Env::new` before it spawns anything, and the `OnceLock` makes
+/// them all wait here, so no fork can happen while a script is being written.
+/// A static is never dropped, so the directory is left in Cargo's target
+/// tmp directory, which `cargo clean` removes.
+fn stand_ins() -> &'static Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let openers = [("open", OPENER), ("xdg-open", OPENER)];
+        let herdr = [("terminal-browser", TERMINAL_BROWSER), ("herdr", HERDR)];
+        let sets: [(&str, &[(&str, &str)]); 3] = [
+            ("none", &[]),
+            ("plain", &openers),
+            ("herdr", &[openers.as_slice(), herdr.as_slice()].concat()),
+        ];
+        for (set, scripts) in sets {
+            let bin = dir.path().join(set);
+            fs::create_dir(&bin).unwrap();
+            for (name, body) in scripts {
+                let path = bin.join(name);
+                fs::write(&path, body).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        dir
+    })
+    .path()
+}
+
+/// A free port, chosen by binding to port 0. A test that needs to hold the
+/// port itself keeps the listener rather than binding the number again later,
+/// when an outgoing connection may have been given it in the meantime.
+fn free_port() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").unwrap()
+}
+
+/// A scratch directory, the stand-ins on PATH, and a free port for the
 /// server. The server is stopped when this is dropped.
 struct Env {
     dir: tempfile::TempDir,
+    bin: PathBuf,
     port: u16,
     herdr: bool,
     /// PATH beyond the stand-ins, which the opener test empties: the machine
@@ -111,30 +157,25 @@ struct Env {
 
 impl Env {
     fn new(herdr: bool) -> Env {
+        let bin = stand_ins().join(if herdr { "herdr" } else { "plain" });
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        fs::create_dir(&bin).unwrap();
-        let mut scripts = vec![("open", OPENER), ("xdg-open", OPENER)];
-        if herdr {
-            scripts.push(("terminal-browser", TERMINAL_BROWSER));
-            scripts.push(("herdr", HERDR));
-        }
-        for (name, body) in scripts {
-            let path = bin.join(name);
-            fs::write(&path, body).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = free_port().local_addr().unwrap().port();
         Env {
             dir,
+            bin,
             port,
             herdr,
             system_path: ":/usr/bin:/bin",
         }
+    }
+
+    /// An `Env` whose port is held by the returned listener, for a test that
+    /// plays the process already on the port.
+    fn with_listener() -> (Env, TcpListener) {
+        let mut env = Env::new(false);
+        let listener = free_port();
+        env.port = listener.local_addr().unwrap().port();
+        (env, listener)
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -156,7 +197,7 @@ impl Env {
             .args(args)
             .env(
                 "PATH",
-                format!("{}{}", self.path("bin").display(), self.system_path),
+                format!("{}{}", self.bin.display(), self.system_path),
             )
             .env("BLUELINE_PORT", self.port.to_string())
             .env("TMPDIR", self.dir.path())
@@ -323,8 +364,7 @@ fn reports_what_cannot_be_previewed() {
 fn refuses_without_an_opener() {
     let mut env = Env::new(false);
     env.system_path = "";
-    fs::remove_file(env.path("bin/open")).unwrap();
-    fs::remove_file(env.path("bin/xdg-open")).unwrap();
+    env.bin = stand_ins().join("none");
     let file = env.markdown("a.md");
     let err = env.fails(&[file.to_str().unwrap()]);
     assert!(
@@ -462,8 +502,7 @@ fn impostor(listener: TcpListener, health: String) -> std::sync::mpsc::Receiver<
 
 #[test]
 fn an_impostor_on_the_port_gets_no_signal_and_no_paths() {
-    let env = Env::new(false);
-    let listener = TcpListener::bind(("127.0.0.1", env.port)).unwrap();
+    let (env, listener) = Env::with_listener();
     let mut victim = Command::new("sleep").arg("30").spawn().unwrap();
     let health = serde_json::json!({
         "ok": true, "server": "blueline", "version": "9.9.9",
@@ -495,8 +534,7 @@ fn an_impostor_on_the_port_gets_no_signal_and_no_paths() {
 
 #[test]
 fn something_that_is_not_blueline_is_sent_nothing() {
-    let env = Env::new(false);
-    let listener = TcpListener::bind(("127.0.0.1", env.port)).unwrap();
+    let (env, listener) = Env::with_listener();
     let requests = impostor(listener, "<html>hello</html>".to_owned());
     let file = env.markdown("a.md");
     let err = env.fails(&[file.to_str().unwrap()]);
