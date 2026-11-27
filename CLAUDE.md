@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+Instructions for coding agents working in this repository. `AGENTS.md` is a
+symlink to this file, so agents that read either name get the same rules.
+
 ## Merging pull requests
 
 This repo is also reviewed by Codex (`chatgpt-codex-connector[bot]`). Never merge a
